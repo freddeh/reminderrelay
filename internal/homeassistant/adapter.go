@@ -136,7 +136,7 @@ func NewAdapterWithClient(rest RESTClient, logger *slog.Logger) *Adapter {
 func (a *Adapter) Ping(ctx context.Context) error {
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.Ping(ctx)
-	})
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("ping HA: %w", err)
 	}
@@ -169,7 +169,7 @@ func (a *Adapter) GetItems(ctx context.Context, entityID string) ([]model.Item, 
 		var callErr error
 		resp, callErr = a.rest.CallServiceWithResponse(ctx, domainTodo, serviceGetItems, serviceBody(data))
 		return callErr
-	})
+	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get items for %s: %w", entityID, err)
 	}
@@ -190,21 +190,38 @@ func (a *Adapter) AddItem(ctx context.Context, entityID string, item *model.Item
 	}
 
 	data := buildAddItemData(entityID, item)
+
+	// alreadyAdded checks whether an item matching this add has already
+	// appeared in HA, so a lost response doesn't cause a duplicate add_item
+	// call. It also determines the final UID once the add succeeds.
+	var uid string
+	alreadyAdded := func() (bool, error) {
+		after, err := a.GetItems(ctx, entityID)
+		if err != nil {
+			return false, fmt.Errorf("fetching items for %s: %w", entityID, err)
+		}
+		if id, ok := diffNewItemUID(before, after, item.Title); ok {
+			uid = id
+			return true, nil
+		}
+		return false, nil
+	}
+
 	err = Retry(ctx, defaultMaxAttempts, func() error {
-		return a.rest.CallService(ctx, domainTodo, serviceAddItem, serviceBody(data))
-	})
+		if callErr := a.rest.CallService(ctx, domainTodo, serviceAddItem, serviceBody(data)); callErr != nil {
+			return callErr
+		}
+		found, findErr := alreadyAdded()
+		if findErr != nil {
+			return findErr
+		}
+		if !found {
+			return fmt.Errorf("added item %q to %s but it did not appear in get_items", item.Title, entityID)
+		}
+		return nil
+	}, alreadyAdded)
 	if err != nil {
 		return "", fmt.Errorf("add item %q to %s: %w", item.Title, entityID, err)
-	}
-
-	after, err := a.GetItems(ctx, entityID)
-	if err != nil {
-		return "", fmt.Errorf("fetching items after add for %s: %w", entityID, err)
-	}
-
-	uid, ok := diffNewItemUID(before, after, item.Title)
-	if !ok {
-		return "", fmt.Errorf("added item %q to %s but could not determine its HA UID", item.Title, entityID)
 	}
 	return uid, nil
 }
@@ -243,7 +260,7 @@ func (a *Adapter) UpdateItem(ctx context.Context, entityID, currentTitle string,
 	data := buildUpdateItemData(entityID, currentTitle, item)
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceUpdateItem, serviceBody(data))
-	})
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("update item %q in %s: %w", currentTitle, entityID, err)
 	}
@@ -255,7 +272,7 @@ func (a *Adapter) RemoveItem(ctx context.Context, entityID, title string) error 
 	data := buildRemoveItemData(entityID, title)
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceRemoveItem, serviceBody(data))
-	})
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("remove item %q from %s: %w", title, entityID, err)
 	}

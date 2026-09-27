@@ -25,11 +25,29 @@ const (
 // Retry executes fn up to maxAttempts times with exponential backoff and
 // jitter. It returns nil on the first successful call, or a wrapped error
 // containing the last failure if all attempts are exhausted.
-func Retry(ctx context.Context, maxAttempts int, fn func() error) error {
+//
+// precheck, if non-nil, is called before every attempt after the first (i.e.
+// before each retry, never before the initial attempt). If precheck reports
+// the operation as already done, Retry returns immediately without calling
+// fn again. This is required for non-idempotent operations such as creating
+// an item, where a prior attempt may have already succeeded on the remote
+// side even though its response was lost (e.g. a timeout) — blindly retrying
+// fn in that case would create a duplicate.
+func Retry(ctx context.Context, maxAttempts int, fn func() error, precheck func() (done bool, err error)) error {
 	var lastErr error
 	for attempt := range maxAttempts {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("retry cancelled: %w", err)
+		}
+
+		if attempt > 0 && precheck != nil {
+			done, err := precheck()
+			if err != nil {
+				return fmt.Errorf("checking whether operation already succeeded: %w", err)
+			}
+			if done {
+				return nil
+			}
 		}
 
 		lastErr = fn()

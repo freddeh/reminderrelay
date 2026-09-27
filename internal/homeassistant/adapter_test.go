@@ -20,6 +20,14 @@ type fakeRESTClient struct {
 	mu    sync.Mutex
 	items map[string][]haTodoItem // entityID -> items
 	seq   int
+
+	addItemCalls int // number of times add_item actually reached the "backend"
+
+	// addItemFailAfterApply makes the next N add_item calls apply the
+	// mutation (the item really gets created) but still report an error —
+	// simulating HA receiving the request while the response is lost
+	// (e.g. a timeout).
+	addItemFailAfterApply int
 }
 
 func newFakeRESTClient() *fakeRESTClient {
@@ -40,6 +48,7 @@ func (f *fakeRESTClient) CallService(_ context.Context, _, service string, body 
 
 	switch service {
 	case serviceAddItem:
+		f.addItemCalls++
 		title, _ := data["item"].(string)
 		desc, _ := data["description"].(string)
 
@@ -50,6 +59,11 @@ func (f *fakeRESTClient) CallService(_ context.Context, _, service string, body 
 			Description: desc,
 			Status:      statusNeedsAction,
 		})
+
+		if f.addItemFailAfterApply > 0 {
+			f.addItemFailAfterApply--
+			return fmt.Errorf("simulated: response lost after item was created")
+		}
 		return nil
 	default:
 		return fmt.Errorf("fakeRESTClient: unhandled service %s", service)
@@ -144,6 +158,81 @@ func (n *noopAddRESTClient) CallService(_ context.Context, _, service string, _ 
 		return nil // pretend success, but don't touch n.items
 	}
 	return fmt.Errorf("unhandled service %s", service)
+}
+
+// ---------------------------------------------------------------------------
+// AddItem: no blind retry (dedupe check before every retry)
+// ---------------------------------------------------------------------------
+
+func TestAdapter_AddItem_LostResponse_DoesNotDuplicate(t *testing.T) {
+	rest := newFakeRESTClient()
+	// The first add_item call creates the item in HA, but its response is
+	// lost (e.g. network timeout), so the Adapter believes it failed.
+	rest.addItemFailAfterApply = 1
+
+	a := NewAdapterWithClient(rest, slog.Default())
+
+	uid, err := a.AddItem(context.Background(), "todo.shopping", &model.Item{Title: "Buy milk"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uid == "" {
+		t.Fatal("expected a non-empty UID")
+	}
+
+	if rest.addItemCalls != 1 {
+		t.Errorf("add_item was called %d times, want 1 (retry must check for the existing item first)", rest.addItemCalls)
+	}
+
+	items, err := a.GetItems(context.Background(), "todo.shopping")
+	if err != nil {
+		t.Fatalf("GetItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("HA has %d items, want 1 (no duplicate created)", len(items))
+	}
+	if items[0].UID != uid || items[0].Title != "Buy milk" {
+		t.Errorf("unexpected item: %+v", items[0])
+	}
+}
+
+func TestAdapter_AddItem_GenuineFailure_DoesRetryAndCreatesOnce(t *testing.T) {
+	// A genuine failure (nothing applied) must still be retried normally,
+	// and must still result in exactly one created item once it succeeds.
+	rest := &transientThenSuccessRESTClient{fakeRESTClient: newFakeRESTClient(), failures: 2}
+
+	a := NewAdapterWithClient(rest, slog.Default())
+
+	uid, err := a.AddItem(context.Background(), "todo.shopping", &model.Item{Title: "Buy milk"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	items, err := a.GetItems(context.Background(), "todo.shopping")
+	if err != nil {
+		t.Fatalf("GetItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("HA has %d items, want 1", len(items))
+	}
+	if items[0].UID != uid {
+		t.Errorf("returned uid %q does not match created item %q", uid, items[0].UID)
+	}
+}
+
+// transientThenSuccessRESTClient fails add_item without applying anything
+// for the first `failures` calls, then delegates normally.
+type transientThenSuccessRESTClient struct {
+	*fakeRESTClient
+	failures int
+}
+
+func (t *transientThenSuccessRESTClient) CallService(ctx context.Context, domain, service string, body io.Reader) error {
+	if service == serviceAddItem && t.failures > 0 {
+		t.failures--
+		return fmt.Errorf("simulated transient network failure")
+	}
+	return t.fakeRESTClient.CallService(ctx, domain, service, body)
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ func TestRetry_SucceedsFirstAttempt(t *testing.T) {
 	err := Retry(context.Background(), 3, func() error {
 		calls++
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestRetry_SucceedsSecondAttempt(t *testing.T) {
 			return sentinel
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestRetry_AllAttemptsFail(t *testing.T) {
 	err := Retry(context.Background(), 3, func() error {
 		calls++
 		return sentinel
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -65,7 +65,7 @@ func TestRetry_ContextCancelledBeforeAttempt(t *testing.T) {
 	err := Retry(ctx, 3, func() error {
 		calls++
 		return nil
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -86,7 +86,7 @@ func TestRetry_ContextCancelledDuringBackoff(t *testing.T) {
 	err := Retry(ctx, 10, func() error {
 		calls++
 		return sentinel
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -100,9 +100,67 @@ func TestRetry_SingleAttempt(t *testing.T) {
 	sentinel := errors.New("fail once")
 	err := Retry(context.Background(), 1, func() error {
 		return sentinel
-	})
+	}, nil)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("expected sentinel in chain, got: %v", err)
+	}
+}
+
+func TestRetry_PrecheckNotCalledBeforeFirstAttempt(t *testing.T) {
+	precheckCalls := 0
+	err := Retry(context.Background(), 3, func() error {
+		return nil
+	}, func() (bool, error) {
+		precheckCalls++
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if precheckCalls != 0 {
+		t.Errorf("precheck called %d times, want 0 (never called before the first attempt)", precheckCalls)
+	}
+}
+
+func TestRetry_PrecheckSkipsFurtherAttempts(t *testing.T) {
+	sentinel := errors.New("transient")
+	fnCalls := 0
+	precheckCalls := 0
+
+	err := Retry(context.Background(), 5, func() error {
+		fnCalls++
+		return sentinel
+	}, func() (bool, error) {
+		precheckCalls++
+		return true, nil // operation already succeeded on a prior attempt
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fnCalls != 1 {
+		t.Errorf("fn called %d times, want 1 (no blind retry once precheck reports done)", fnCalls)
+	}
+	if precheckCalls != 1 {
+		t.Errorf("precheck called %d times, want 1", precheckCalls)
+	}
+}
+
+func TestRetry_PrecheckErrorAbortsRetry(t *testing.T) {
+	sentinel := errors.New("transient")
+	checkErr := errors.New("cannot verify state")
+	fnCalls := 0
+
+	err := Retry(context.Background(), 5, func() error {
+		fnCalls++
+		return sentinel
+	}, func() (bool, error) {
+		return false, checkErr
+	})
+	if !errors.Is(err, checkErr) {
+		t.Errorf("expected checkErr in chain, got: %v", err)
+	}
+	if fnCalls != 1 {
+		t.Errorf("fn called %d times, want 1 (aborted after precheck error)", fnCalls)
 	}
 }
 

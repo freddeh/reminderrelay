@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -20,6 +21,13 @@ const (
 	metricDeleted   = "reminderrelay.sync.items.deleted"
 	metricConflicts = "reminderrelay.sync.conflicts"
 	metricErrors    = "reminderrelay.sync.errors"
+
+	// wsDebounceWindow is how long the engine waits after a WebSocket
+	// state_changed event before reconciling that entity. HA tends to fire
+	// several events in quick succession for a single user action (e.g. one
+	// per field update); without debouncing, each would trigger its own
+	// reconcile pass.
+	wsDebounceWindow = 2 * time.Second
 )
 
 // HAConnector provides WebSocket lifecycle methods for the Engine.
@@ -40,6 +48,13 @@ type Engine struct {
 	listMappings map[string]string
 	pollInterval time.Duration
 	log          *slog.Logger
+
+	// debounceWindow is how long a WS event waits before triggering a
+	// reconcile; overridable in tests. debounceTimers holds one pending
+	// timer per entity ID.
+	debounceWindow time.Duration
+	debounceMu     sync.Mutex
+	debounceTimers map[string]*time.Timer
 
 	// OTel instruments — always non-nil (no-op when telemetry is disabled).
 	tracer     trace.Tracer
@@ -71,6 +86,9 @@ func NewEngine(reconciler *Reconciler, haConn HAConnector, listMappings map[stri
 		listMappings: listMappings,
 		pollInterval: pollInterval,
 		log:          logger,
+
+		debounceWindow: wsDebounceWindow,
+		debounceTimers: make(map[string]*time.Timer),
 
 		tracer:       tracer,
 		cntCreated:   mustCounter(metricCreated, "Number of items created during sync"),
@@ -118,6 +136,29 @@ func (e *Engine) reconcile(ctx context.Context) (Stats, error) {
 	return stats, err
 }
 
+// debounceReconcile schedules a ReconcileEntity call for entityID after
+// e.debounceWindow, resetting any pending timer for that entity. A burst of
+// WS events for the same entity (HA commonly fires several per user action)
+// thus triggers a single reconcile once things settle, rather than one per
+// event.
+func (e *Engine) debounceReconcile(ctx context.Context, listName, entityID string) {
+	e.debounceMu.Lock()
+	defer e.debounceMu.Unlock()
+
+	if t, ok := e.debounceTimers[entityID]; ok {
+		t.Stop()
+	}
+	e.debounceTimers[entityID] = time.AfterFunc(e.debounceWindow, func() {
+		if ctx.Err() != nil {
+			return
+		}
+		e.log.Info("debounced WS event triggered reconcile", "entity_id", entityID)
+		if _, err := e.reconciler.ReconcileEntity(ctx, listName, entityID); err != nil {
+			e.log.Error("WS-triggered reconcile failed", "entity_id", entityID, "error", err)
+		}
+	})
+}
+
 // RunOnce performs a single reconciliation pass and returns.
 func (e *Engine) RunOnce(ctx context.Context) (Stats, error) {
 	return e.reconcile(ctx)
@@ -150,10 +191,7 @@ func (e *Engine) Run(ctx context.Context) error {
 					if !ok {
 						return
 					}
-					e.log.Info("WS event triggered reconcile", "entity_id", entityID)
-					if _, err := e.reconciler.ReconcileEntity(ctx, listName, entityID); err != nil {
-						e.log.Error("WS-triggered reconcile failed", "entity_id", entityID, "error", err)
-					}
+					e.debounceReconcile(ctx, listName, entityID)
 				})
 				if err != nil && ctx.Err() == nil {
 					e.log.Error("WS subscription ended unexpectedly", "error", err)

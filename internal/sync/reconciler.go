@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/njoerd114/reminderrelay/internal/model"
@@ -33,13 +36,19 @@ type Stats struct {
 }
 
 // Reconciler performs a single bidirectional sync pass across all configured
-// list mappings. It is stateless between calls — all persistent state lives
-// in the [StateStore].
+// list mappings. Aside from mu, it is stateless between calls — all
+// persistent state lives in the [StateStore].
 type Reconciler struct {
 	rem   RemindersSource
 	ha    HASource
 	store StateStore
 	log   *slog.Logger
+
+	// mu serializes Run and ReconcileEntity so the polling loop and
+	// WebSocket-triggered reconciles never execute concurrently. Without it,
+	// both could observe the same untracked item at once and each create it
+	// on the other side, producing a duplicate.
+	mu sync.Mutex
 }
 
 // NewReconciler creates a Reconciler wired to the given adapters and state store.
@@ -51,6 +60,9 @@ func NewReconciler(rem RemindersSource, ha HASource, store StateStore, logger *s
 // aggregate statistics and the first error encountered (sync continues past
 // individual item errors to maximise progress).
 func (r *Reconciler) Run(ctx context.Context, listMappings map[string]string) (Stats, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var stats Stats
 	var firstErr error
 
@@ -98,6 +110,9 @@ func (r *Reconciler) Run(ctx context.Context, listMappings map[string]string) (S
 // ReconcileEntity performs reconciliation for a single HA entity. Called by
 // the WebSocket listener when a state_changed event is received.
 func (r *Reconciler) ReconcileEntity(ctx context.Context, listName, entityID string) (Stats, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	// We need the Reminders items for just this list.
 	remItems, err := r.rem.FetchAll(ctx, []string{listName})
 	if err != nil {
@@ -188,28 +203,59 @@ func (r *Reconciler) reconcileList(ctx context.Context, listName, entityID strin
 		}
 	}
 
-	// 2. Detect new Reminders items not in state DB → create in HA.
+	// 2. Detect untracked Reminders items. Before creating a counterpart in
+	// HA, check whether an untracked HA item with the same title already
+	// exists and link them instead of creating a duplicate — e.g. after a
+	// state DB reset, or two near-simultaneous additions on both sides.
+	var untrackedRem []*model.Item
 	for uid, remItem := range remByUID {
-		if remItem.ListName != listName {
+		if remItem.ListName != listName || processedRemUIDs[uid] {
 			continue
 		}
-		if processedRemUIDs[uid] {
+		untrackedRem = append(untrackedRem, remItem)
+	}
+	sort.Slice(untrackedRem, func(i, j int) bool { return untrackedRem[i].UID < untrackedRem[j].UID })
+
+	untrackedHAByTitle := make(map[string]*model.Item, len(haByUID))
+	for uid, haItem := range haByUID {
+		if processedHAUIDs[uid] {
+			continue
+		}
+		untrackedHAByTitle[strings.ToLower(haItem.Title)] = haItem
+	}
+
+	for _, remItem := range untrackedRem {
+		key := strings.ToLower(remItem.Title)
+		haMatch, ok := untrackedHAByTitle[key]
+		if !ok {
+			r.log.Info("new reminder detected", "title", remItem.Title, "uid", remItem.UID)
+			if err := r.createInHA(ctx, remItem, entityID); err != nil {
+				r.log.Error("failed to create in HA", "title", remItem.Title, "error", err)
+				stats.Errors++
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				stats.Created++
+			}
 			continue
 		}
 
-		r.log.Info("new reminder detected", "title", remItem.Title, "uid", uid)
-		if err := r.createInHA(ctx, remItem, entityID); err != nil {
-			r.log.Error("failed to create in HA", "title", remItem.Title, "error", err)
+		r.log.Info("linking untracked items with matching title instead of creating a duplicate",
+			"title", remItem.Title, "reminders_uid", remItem.UID, "ha_uid", haMatch.UID)
+		if err := r.linkExisting(ctx, remItem, haMatch); err != nil {
+			r.log.Error("failed to link matched items", "title", remItem.Title, "error", err)
 			stats.Errors++
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		stats.Created++
+		delete(untrackedHAByTitle, key)
+		processedHAUIDs[haMatch.UID] = true
 	}
 
-	// 3. Detect new HA items not in state DB → create in Reminders.
+	// 3. Any HA items still untracked (not linked above) → create in Reminders.
 	for uid, haItem := range haByUID {
 		if processedHAUIDs[uid] {
 			continue
@@ -353,22 +399,9 @@ func (r *Reconciler) execute(ctx context.Context, act action, si *state.Item, re
 
 // createInHA pushes a new Reminders item to HA and writes the state DB entry.
 func (r *Reconciler) createInHA(ctx context.Context, remItem *model.Item, entityID string) error {
-	if err := r.ha.AddItem(ctx, entityID, remItem); err != nil {
-		return fmt.Errorf("adding %q to HA: %w", remItem.Title, err)
-	}
-
-	// After adding, fetch items again to get the HA UID.
-	haItems, err := r.ha.GetItems(ctx, entityID)
+	haUID, err := r.ha.AddItem(ctx, entityID, remItem)
 	if err != nil {
-		return fmt.Errorf("refetching items from %s: %w", entityID, err)
-	}
-
-	var haUID string
-	for _, h := range haItems {
-		if h.Title == remItem.Title {
-			haUID = h.UID
-			break
-		}
+		return fmt.Errorf("adding %q to HA: %w", remItem.Title, err)
 	}
 
 	now := time.Now().UTC()
@@ -379,6 +412,26 @@ func (r *Reconciler) createInHA(ctx context.Context, remItem *model.Item, entity
 		Title:             remItem.Title,
 		LastSyncHash:      remItem.ContentHash(),
 		RemindersModified: remItem.ModifiedAt,
+		LastSyncedAt:      now,
+	}
+	return r.store.UpsertItem(ctx, si)
+}
+
+// linkExisting writes a state DB entry connecting an untracked Reminders item
+// to an untracked HA item that share the same title, instead of creating a
+// duplicate on either side. No content is pushed to either adapter here — if
+// the two still differ beyond their title, the next reconcile pass will
+// detect and propagate that normally.
+func (r *Reconciler) linkExisting(ctx context.Context, remItem, haItem *model.Item) error {
+	now := time.Now().UTC()
+	si := &state.Item{
+		RemindersUID:      remItem.UID,
+		HAUID:             haItem.UID,
+		ListName:          remItem.ListName,
+		Title:             remItem.Title,
+		LastSyncHash:      remItem.ContentHash(),
+		RemindersModified: remItem.ModifiedAt,
+		HAModified:        haItem.ModifiedAt,
 		LastSyncedAt:      now,
 	}
 	return r.store.UpsertItem(ctx, si)

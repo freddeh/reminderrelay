@@ -30,7 +30,7 @@ type RemindersSource interface {
 // Implemented by [homeassistant.Adapter].
 type HASource interface {
 	GetItems(ctx context.Context, entityID string) ([]model.Item, error)
-	AddItem(ctx context.Context, entityID string, item *model.Item) error
+	AddItem(ctx context.Context, entityID string, item *model.Item) (uid string, err error)
 	UpdateItem(ctx context.Context, entityID, currentTitle string, item *model.Item) error
 	RemoveItem(ctx context.Context, entityID, title string) error
 }

@@ -118,36 +118,48 @@ func (b *Bootstrap) Run(ctx context.Context, listMappings map[string]string) (bo
 	return true, nil
 }
 
-// matchByTitle matches Reminders items to HA items by exact title (case-insensitive).
+// matchByTitle matches Reminders items to HA items by exact title
+// (case-insensitive). When multiple items share the same title on either
+// side (e.g. a recurring reminder created many times with an identical
+// name), they are matched one-to-one in order rather than every Reminders
+// item with that title claiming the same single HA item — the latter would
+// both lose track of the other HA items entirely and, downstream, attempt to
+// link several Reminders items to one HA UID, violating the ha_uid unique
+// constraint in the state DB.
 func matchByTitle(listName, entityID string, remItems []*model.Item, haItems []model.Item) matchResult {
 	result := matchResult{
 		listName: listName,
 		entityID: entityID,
 	}
 
-	// Build HA title → item index.
-	haByTitle := make(map[string]*model.Item, len(haItems))
+	// Group HA items by title, preserving their original order, so each
+	// title's items can be handed out one at a time (FIFO).
+	haByTitle := make(map[string][]*model.Item, len(haItems))
 	for i := range haItems {
 		haItems[i].ListName = listName
 		key := strings.ToLower(haItems[i].Title)
-		haByTitle[key] = &haItems[i]
+		haByTitle[key] = append(haByTitle[key], &haItems[i])
 	}
 
-	matchedHATitles := make(map[string]bool)
+	matchedHAUIDs := make(map[string]bool, len(haItems))
 
 	for _, rem := range remItems {
 		key := strings.ToLower(rem.Title)
-		if ha, ok := haByTitle[key]; ok {
-			result.matched = append(result.matched, matchedPair{rem: rem, ha: ha})
-			matchedHATitles[key] = true
-		} else {
+		queue := haByTitle[key]
+		if len(queue) == 0 {
 			result.remOnly = append(result.remOnly, rem)
+			continue
 		}
+		ha := queue[0]
+		haByTitle[key] = queue[1:]
+		result.matched = append(result.matched, matchedPair{rem: rem, ha: ha})
+		matchedHAUIDs[ha.UID] = true
 	}
 
+	// Anything not claimed above is HA-only. Iterate haItems in its original
+	// order (rather than the map) so the result is deterministic.
 	for i := range haItems {
-		key := strings.ToLower(haItems[i].Title)
-		if !matchedHATitles[key] {
+		if !matchedHAUIDs[haItems[i].UID] {
 			result.haOnly = append(result.haOnly, &haItems[i])
 		}
 	}

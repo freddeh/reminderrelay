@@ -159,6 +159,86 @@ func TestUpsert_UpdatePath(t *testing.T) {
 	}
 }
 
+// TestUpsertItem_DuplicateHAUID_Rejected guards the idx_ha_uid unique index:
+// a second row for a different Reminders item must not be allowed to claim
+// an HA UID that's already tracked by another row, even though UpsertItem's
+// ON CONFLICT only targets reminders_uid.
+func TestUpsertItem_DuplicateHAUID_Rejected(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	first := sampleItem()
+	if err := s.UpsertItem(ctx, first); err != nil {
+		t.Fatalf("first UpsertItem: %v", err)
+	}
+
+	second := sampleItem()
+	second.RemindersUID = "rem-uid-002" // different Reminders item...
+	second.HAUID = first.HAUID          // ...but claims the same HA UID.
+
+	if err := s.UpsertItem(ctx, second); err == nil {
+		t.Fatal("expected UpsertItem to fail on duplicate ha_uid, got nil error")
+	}
+
+	all, err := s.GetAllItemsForList(ctx, "Shopping")
+	if err != nil {
+		t.Fatalf("GetAllItemsForList: %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("expected 1 item after rejected duplicate, got %d", len(all))
+	}
+}
+
+// TestUpsertItem_DuplicateRemindersUID_ViaDirectInsert_Rejected guards the
+// idx_reminders_uid unique index directly at the database level, independent
+// of UpsertItem's own ON CONFLICT merge logic.
+func TestUpsertItem_DuplicateRemindersUID_ViaDirectInsert_Rejected(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertItem(ctx, sampleItem()); err != nil {
+		t.Fatalf("UpsertItem: %v", err)
+	}
+
+	const insert = `
+		INSERT INTO sync_items
+		    (reminders_uid, ha_uid, list_name, title, last_sync_hash,
+		     reminders_modified, ha_modified, last_synced_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(ctx, insert,
+		"rem-uid-001", "ha-uid-002", "Shopping", "Duplicate", "", "", "", "")
+	if err == nil {
+		t.Fatal("expected raw INSERT with duplicate reminders_uid to violate the unique index, got nil error")
+	}
+}
+
+// TestUpsertItem_UnlinkedItemsOnOppositeSides_DoNotConflict ensures the
+// partial unique indexes (WHERE ... != '') don't block the legitimate case
+// of multiple items that are each tracked on only one side and not yet
+// linked to a counterpart.
+func TestUpsertItem_UnlinkedItemsOnOppositeSides_DoNotConflict(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	remOnly := &Item{RemindersUID: "rem-only", HAUID: "", ListName: "Shopping", Title: "Rem only"}
+	haOnly := &Item{RemindersUID: "", HAUID: "ha-only", ListName: "Shopping", Title: "HA only"}
+
+	if err := s.UpsertItem(ctx, remOnly); err != nil {
+		t.Fatalf("UpsertItem(remOnly): %v", err)
+	}
+	if err := s.UpsertItem(ctx, haOnly); err != nil {
+		t.Fatalf("UpsertItem(haOnly): %v", err)
+	}
+
+	all, err := s.GetAllItemsForList(ctx, "Shopping")
+	if err != nil {
+		t.Fatalf("GetAllItemsForList: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("expected 2 items, got %d", len(all))
+	}
+}
+
 func TestGetAllItemsForList(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

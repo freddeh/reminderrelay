@@ -353,22 +353,9 @@ func (r *Reconciler) execute(ctx context.Context, act action, si *state.Item, re
 
 // createInHA pushes a new Reminders item to HA and writes the state DB entry.
 func (r *Reconciler) createInHA(ctx context.Context, remItem *model.Item, entityID string) error {
-	if err := r.ha.AddItem(ctx, entityID, remItem); err != nil {
-		return fmt.Errorf("adding %q to HA: %w", remItem.Title, err)
-	}
-
-	// After adding, fetch items again to get the HA UID.
-	haItems, err := r.ha.GetItems(ctx, entityID)
+	haUID, err := r.ha.AddItem(ctx, entityID, remItem)
 	if err != nil {
-		return fmt.Errorf("refetching items from %s: %w", entityID, err)
-	}
-
-	var haUID string
-	for _, h := range haItems {
-		if h.Title == remItem.Title {
-			haUID = h.UID
-			break
-		}
+		return fmt.Errorf("adding %q to HA: %w", remItem.Title, err)
 	}
 
 	now := time.Now().UTC()

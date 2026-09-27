@@ -177,17 +177,64 @@ func (a *Adapter) GetItems(ctx context.Context, entityID string) ([]model.Item, 
 	return parseGetItemsResponse(resp, entityID)
 }
 
-// AddItem creates a new todo item in the given HA entity. The item's Priority
-// is encoded as a description prefix automatically.
-func (a *Adapter) AddItem(ctx context.Context, entityID string, item *model.Item) error {
+// AddItem creates a new todo item in the given HA entity and returns its
+// HA-assigned UID. The item's Priority is encoded as a description prefix
+// automatically.
+//
+// HA's todo.add_item service does not return the created item, so the UID is
+// determined by diffing todo.get_items before and after the call.
+func (a *Adapter) AddItem(ctx context.Context, entityID string, item *model.Item) (string, error) {
+	before, err := a.GetItems(ctx, entityID)
+	if err != nil {
+		return "", fmt.Errorf("fetching items before add for %s: %w", entityID, err)
+	}
+
 	data := buildAddItemData(entityID, item)
-	err := Retry(ctx, defaultMaxAttempts, func() error {
+	err = Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceAddItem, serviceBody(data))
 	})
 	if err != nil {
-		return fmt.Errorf("add item %q to %s: %w", item.Title, entityID, err)
+		return "", fmt.Errorf("add item %q to %s: %w", item.Title, entityID, err)
 	}
-	return nil
+
+	after, err := a.GetItems(ctx, entityID)
+	if err != nil {
+		return "", fmt.Errorf("fetching items after add for %s: %w", entityID, err)
+	}
+
+	uid, ok := diffNewItemUID(before, after, item.Title)
+	if !ok {
+		return "", fmt.Errorf("added item %q to %s but could not determine its HA UID", item.Title, entityID)
+	}
+	return uid, nil
+}
+
+// diffNewItemUID returns the UID of the item present in after but not in
+// before. If more than one such item exists (e.g. a concurrent change from
+// outside the sync engine added another item at the same time), the one
+// matching title is preferred; otherwise the first candidate is returned.
+func diffNewItemUID(before, after []model.Item, title string) (string, bool) {
+	beforeUIDs := make(map[string]struct{}, len(before))
+	for _, it := range before {
+		beforeUIDs[it.UID] = struct{}{}
+	}
+
+	var candidates []model.Item
+	for _, it := range after {
+		if _, existed := beforeUIDs[it.UID]; !existed {
+			candidates = append(candidates, it)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return "", false
+	}
+	for _, c := range candidates {
+		if c.Title == title {
+			return c.UID, true
+		}
+	}
+	return candidates[0].UID, true
 }
 
 // UpdateItem updates an existing todo item in HA. currentTitle is the item's

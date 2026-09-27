@@ -230,21 +230,9 @@ func (b *Bootstrap) execute(ctx context.Context, results []matchResult) error {
 
 		// Push Reminders-only items to HA.
 		for _, item := range r.remOnly {
-			if err := b.ha.AddItem(ctx, r.entityID, item); err != nil {
-				return fmt.Errorf("pushing %q to HA: %w", item.Title, err)
-			}
-
-			// Refetch to get the HA UID.
-			haItems, err := b.ha.GetItems(ctx, r.entityID)
+			haUID, err := b.ha.AddItem(ctx, r.entityID, item)
 			if err != nil {
-				return fmt.Errorf("refetching items from %s: %w", r.entityID, err)
-			}
-			var haUID string
-			for _, h := range haItems {
-				if h.Title == item.Title {
-					haUID = h.UID
-					break
-				}
+				return fmt.Errorf("pushing %q to HA: %w", item.Title, err)
 			}
 
 			si := &state.Item{

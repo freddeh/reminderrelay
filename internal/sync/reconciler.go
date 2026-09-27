@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/njoerd114/reminderrelay/internal/model"
@@ -33,13 +34,19 @@ type Stats struct {
 }
 
 // Reconciler performs a single bidirectional sync pass across all configured
-// list mappings. It is stateless between calls — all persistent state lives
-// in the [StateStore].
+// list mappings. Aside from mu, it is stateless between calls — all
+// persistent state lives in the [StateStore].
 type Reconciler struct {
 	rem   RemindersSource
 	ha    HASource
 	store StateStore
 	log   *slog.Logger
+
+	// mu serializes Run and ReconcileEntity so the polling loop and
+	// WebSocket-triggered reconciles never execute concurrently. Without it,
+	// both could observe the same untracked item at once and each create it
+	// on the other side, producing a duplicate.
+	mu sync.Mutex
 }
 
 // NewReconciler creates a Reconciler wired to the given adapters and state store.
@@ -51,6 +58,9 @@ func NewReconciler(rem RemindersSource, ha HASource, store StateStore, logger *s
 // aggregate statistics and the first error encountered (sync continues past
 // individual item errors to maximise progress).
 func (r *Reconciler) Run(ctx context.Context, listMappings map[string]string) (Stats, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var stats Stats
 	var firstErr error
 
@@ -98,6 +108,9 @@ func (r *Reconciler) Run(ctx context.Context, listMappings map[string]string) (S
 // ReconcileEntity performs reconciliation for a single HA entity. Called by
 // the WebSocket listener when a state_changed event is received.
 func (r *Reconciler) ReconcileEntity(ctx context.Context, listName, entityID string) (Stats, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	// We need the Reminders items for just this list.
 	remItems, err := r.rem.FetchAll(ctx, []string{listName})
 	if err != nil {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,28 +203,59 @@ func (r *Reconciler) reconcileList(ctx context.Context, listName, entityID strin
 		}
 	}
 
-	// 2. Detect new Reminders items not in state DB → create in HA.
+	// 2. Detect untracked Reminders items. Before creating a counterpart in
+	// HA, check whether an untracked HA item with the same title already
+	// exists and link them instead of creating a duplicate — e.g. after a
+	// state DB reset, or two near-simultaneous additions on both sides.
+	var untrackedRem []*model.Item
 	for uid, remItem := range remByUID {
-		if remItem.ListName != listName {
+		if remItem.ListName != listName || processedRemUIDs[uid] {
 			continue
 		}
-		if processedRemUIDs[uid] {
+		untrackedRem = append(untrackedRem, remItem)
+	}
+	sort.Slice(untrackedRem, func(i, j int) bool { return untrackedRem[i].UID < untrackedRem[j].UID })
+
+	untrackedHAByTitle := make(map[string]*model.Item, len(haByUID))
+	for uid, haItem := range haByUID {
+		if processedHAUIDs[uid] {
+			continue
+		}
+		untrackedHAByTitle[strings.ToLower(haItem.Title)] = haItem
+	}
+
+	for _, remItem := range untrackedRem {
+		key := strings.ToLower(remItem.Title)
+		haMatch, ok := untrackedHAByTitle[key]
+		if !ok {
+			r.log.Info("new reminder detected", "title", remItem.Title, "uid", remItem.UID)
+			if err := r.createInHA(ctx, remItem, entityID); err != nil {
+				r.log.Error("failed to create in HA", "title", remItem.Title, "error", err)
+				stats.Errors++
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				stats.Created++
+			}
 			continue
 		}
 
-		r.log.Info("new reminder detected", "title", remItem.Title, "uid", uid)
-		if err := r.createInHA(ctx, remItem, entityID); err != nil {
-			r.log.Error("failed to create in HA", "title", remItem.Title, "error", err)
+		r.log.Info("linking untracked items with matching title instead of creating a duplicate",
+			"title", remItem.Title, "reminders_uid", remItem.UID, "ha_uid", haMatch.UID)
+		if err := r.linkExisting(ctx, remItem, haMatch); err != nil {
+			r.log.Error("failed to link matched items", "title", remItem.Title, "error", err)
 			stats.Errors++
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		stats.Created++
+		delete(untrackedHAByTitle, key)
+		processedHAUIDs[haMatch.UID] = true
 	}
 
-	// 3. Detect new HA items not in state DB → create in Reminders.
+	// 3. Any HA items still untracked (not linked above) → create in Reminders.
 	for uid, haItem := range haByUID {
 		if processedHAUIDs[uid] {
 			continue
@@ -379,6 +412,26 @@ func (r *Reconciler) createInHA(ctx context.Context, remItem *model.Item, entity
 		Title:             remItem.Title,
 		LastSyncHash:      remItem.ContentHash(),
 		RemindersModified: remItem.ModifiedAt,
+		LastSyncedAt:      now,
+	}
+	return r.store.UpsertItem(ctx, si)
+}
+
+// linkExisting writes a state DB entry connecting an untracked Reminders item
+// to an untracked HA item that share the same title, instead of creating a
+// duplicate on either side. No content is pushed to either adapter here — if
+// the two still differ beyond their title, the next reconcile pass will
+// detect and propagate that normally.
+func (r *Reconciler) linkExisting(ctx context.Context, remItem, haItem *model.Item) error {
+	now := time.Now().UTC()
+	si := &state.Item{
+		RemindersUID:      remItem.UID,
+		HAUID:             haItem.UID,
+		ListName:          remItem.ListName,
+		Title:             remItem.Title,
+		LastSyncHash:      remItem.ContentHash(),
+		RemindersModified: remItem.ModifiedAt,
+		HAModified:        haItem.ModifiedAt,
 		LastSyncedAt:      now,
 	}
 	return r.store.UpsertItem(ctx, si)

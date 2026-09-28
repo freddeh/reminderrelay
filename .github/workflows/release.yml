@@ -41,6 +41,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           devbox run -- CGO_ENABLED=1 go build \
+            -buildvcs=false \
             -ldflags "-s -w -X main.version=${VERSION}" \
             -o "reminderrelay-darwin-${{ matrix.goarch }}" \
             ./cmd/reminderrelay

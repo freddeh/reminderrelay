@@ -1,64 +1,6 @@
 {
   "lockfile_version": "1",
   "packages": {
-    "git@latest": {
-      "last_modified": "2026-09-27T03:42:02Z",
-      "resolved": "github:NixOS/nixpkgs/8d5d270900d3fc75655ea2d9d248b234f6631439#git",
-      "source": "devbox-search",
-      "version": "2.55.0",
-      "systems": {
-        "aarch64-darwin": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/304vhl9qr5774qkv5rrqa0xbg429j2kk-git-2.55.0",
-              "default": true
-            },
-            {
-              "name": "doc",
-              "path": "/nix/store/bnl2gk1zzj4lshiykisi0z6y866xj7rn-git-2.55.0-doc"
-            }
-          ],
-          "store_path": "/nix/store/304vhl9qr5774qkv5rrqa0xbg429j2kk-git-2.55.0"
-        },
-        "aarch64-linux": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/wnv9pqby90h45gyha0xwfp1blhmrrcv1-git-2.55.0",
-              "default": true
-            },
-            {
-              "name": "debug",
-              "path": "/nix/store/ldxw9zf2xy8f6zbky0scjiqch10jdp7w-git-2.55.0-debug"
-            },
-            {
-              "name": "doc",
-              "path": "/nix/store/ka7q0r9bxnz0jmi2lh58qx5ijcd3lccf-git-2.55.0-doc"
-            }
-          ],
-          "store_path": "/nix/store/wnv9pqby90h45gyha0xwfp1blhmrrcv1-git-2.55.0"
-        },
-        "x86_64-linux": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/msr1v91ybfw6j12rs5mfl8ghb2rqsnsr-git-2.55.0",
-              "default": true
-            },
-            {
-              "name": "debug",
-              "path": "/nix/store/kad4xijqzqlxmrsl730d2kg62jnljvih-git-2.55.0-debug"
-            },
-            {
-              "name": "doc",
-              "path": "/nix/store/b3f5zvzp33c79pa6pdpyg7kc9hah1826-git-2.55.0-doc"
-            }
-          ],
-          "store_path": "/nix/store/msr1v91ybfw6j12rs5mfl8ghb2rqsnsr-git-2.55.0"
-        }
-      }
-    },
     "github:NixOS/nixpkgs/nixpkgs-unstable": {
       "last_modified": "2026-02-11T21:01:36Z",
       "resolved": "github:NixOS/nixpkgs/2343bbb58f99267223bc2aac4fc9ea301a155a16?lastModified=1770843696&narHash=sha256-LovWTGDwXhkfCOmbgLVA10bvsi%2FP8eDDpRudgk68HA8%3D"

@@ -5,8 +5,7 @@
     "just@latest",
     "golangci-lint@latest",
     "sqlite@latest",
-    "pkg-config@latest",
-    "git@latest"
+    "pkg-config@latest"
   ],
   "env": {
     "CGO_ENABLED": "1",

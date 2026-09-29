@@ -72,7 +72,7 @@ func (a *Adapter) ListCalendarEvents(ctx context.Context, entityID string) ([]mo
 		var callErr error
 		raw, callErr = a.rest.GetCalendarEvents(ctx, entityID, from, to)
 		return callErr
-	})
+	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("listing calendar events for %s: %w", entityID, err)
 	}
@@ -137,7 +137,7 @@ func (a *Adapter) CreateCalendarEvent(ctx context.Context, entityID string, item
 	}
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.ws.Do(ctx, req, nil)
-	})
+	}, nil)
 	if err != nil {
 		return "", fmt.Errorf("creating calendar event %q on %s: %w", item.Title, entityID, err)
 	}
@@ -194,7 +194,7 @@ func (a *Adapter) UpdateCalendarEvent(ctx context.Context, entityID, uid string,
 	}
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.ws.Do(ctx, req, nil)
-	})
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("updating calendar event %s on %s: %w", uid, entityID, err)
 	}
@@ -217,7 +217,7 @@ func (a *Adapter) DeleteCalendarEvent(ctx context.Context, entityID, uid string)
 	}
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.ws.Do(ctx, req, nil)
-	})
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("deleting calendar event %s on %s: %w", uid, entityID, err)
 	}

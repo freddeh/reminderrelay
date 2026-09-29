@@ -18,11 +18,11 @@ default:
 
 # Build the binary
 build:
-    CGO_ENABLED=1 go build -o {{binary}} ./cmd/reminderrelay
+    CGO_ENABLED=1 go build -buildvcs=false -o {{binary}} ./cmd/reminderrelay
 
 # Build with race detector (slower, for CI)
 build-race:
-    CGO_ENABLED=1 go build -race -o {{binary}} ./cmd/reminderrelay
+    CGO_ENABLED=1 go build -buildvcs=false -race -o {{binary}} ./cmd/reminderrelay
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 
@@ -38,11 +38,11 @@ sync-once: build
 
 # Run unit tests with race detector
 test:
-    CGO_ENABLED=1 go test -race ./...
+    CGO_ENABLED=1 go test -buildvcs=false -race ./...
 
 # Run integration tests (requires local Reminders + HA instance)
 test-integration:
-    CGO_ENABLED=1 go test -race -tags integration ./...
+    CGO_ENABLED=1 go test -buildvcs=false -race -tags integration ./...
 
 # Run linter
 lint:

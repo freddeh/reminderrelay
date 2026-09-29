@@ -124,7 +124,7 @@ func (m *mockHA) GetItems(_ context.Context, entityID string) ([]model.Item, err
 	return result, nil
 }
 
-func (m *mockHA) AddItem(_ context.Context, entityID string, item *model.Item) error {
+func (m *mockHA) AddItem(_ context.Context, entityID string, item *model.Item) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -132,7 +132,7 @@ func (m *mockHA) AddItem(_ context.Context, entityID string, item *model.Item) e
 	cp := *item
 	cp.UID = fmt.Sprintf("ha-%d", m.nextUID)
 	m.items[entityID] = append(m.items[entityID], cp)
-	return nil
+	return cp.UID, nil
 }
 
 // findByUIDOrTitle mirrors HA's real todo service resolution

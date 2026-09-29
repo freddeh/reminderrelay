@@ -160,7 +160,7 @@ func NewAdapterWithClient(rest RESTClient, logger *slog.Logger) *Adapter {
 func (a *Adapter) Ping(ctx context.Context) error {
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.Ping(ctx)
-	})
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("ping HA: %w", err)
 	}
@@ -193,7 +193,7 @@ func (a *Adapter) GetItems(ctx context.Context, entityID string) ([]model.Item, 
 		var callErr error
 		resp, callErr = a.rest.CallServiceWithResponse(ctx, domainTodo, serviceGetItems, serviceBody(data))
 		return callErr
-	})
+	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get items for %s: %w", entityID, err)
 	}
@@ -201,20 +201,84 @@ func (a *Adapter) GetItems(ctx context.Context, entityID string) ([]model.Item, 
 	return parseGetItemsResponse(resp, entityID)
 }
 
-// AddItem creates a new todo item in the given HA entity. The item's Priority
-// is encoded as a description prefix automatically. A due date with a
-// time-of-day is sent as due_datetime when the entity supports it, else it
-// falls back to a date-only due_date (see [setDueFields]).
-func (a *Adapter) AddItem(ctx context.Context, entityID string, item *model.Item) error {
+// AddItem creates a new todo item in the given HA entity and returns its
+// HA-assigned UID. The item's Priority is encoded as a description prefix
+// automatically, and a due date with a time-of-day is sent as due_datetime
+// when the entity supports it, else it falls back to a date-only due_date
+// (see [setDueFields]).
+//
+// HA's todo.add_item service does not return the created item, so the UID is
+// determined by diffing todo.get_items before and after the call.
+func (a *Adapter) AddItem(ctx context.Context, entityID string, item *model.Item) (string, error) {
+	before, err := a.GetItems(ctx, entityID)
+	if err != nil {
+		return "", fmt.Errorf("fetching items before add for %s: %w", entityID, err)
+	}
+
 	features := a.entityFeaturesOrZero(ctx, entityID)
 	data := buildAddItemData(entityID, item, features)
-	err := Retry(ctx, defaultMaxAttempts, func() error {
-		return a.rest.CallService(ctx, domainTodo, serviceAddItem, serviceBody(data))
-	})
-	if err != nil {
-		return fmt.Errorf("add item %q to %s: %w", item.Title, entityID, err)
+
+	// alreadyAdded checks whether an item matching this add has already
+	// appeared in HA, so a lost response doesn't cause a duplicate add_item
+	// call. It also determines the final UID once the add succeeds.
+	var uid string
+	alreadyAdded := func() (bool, error) {
+		after, err := a.GetItems(ctx, entityID)
+		if err != nil {
+			return false, fmt.Errorf("fetching items for %s: %w", entityID, err)
+		}
+		if id, ok := diffNewItemUID(before, after, item.Title); ok {
+			uid = id
+			return true, nil
+		}
+		return false, nil
 	}
-	return nil
+
+	err = Retry(ctx, defaultMaxAttempts, func() error {
+		if callErr := a.rest.CallService(ctx, domainTodo, serviceAddItem, serviceBody(data)); callErr != nil {
+			return callErr
+		}
+		found, findErr := alreadyAdded()
+		if findErr != nil {
+			return findErr
+		}
+		if !found {
+			return fmt.Errorf("added item %q to %s but it did not appear in get_items", item.Title, entityID)
+		}
+		return nil
+	}, alreadyAdded)
+	if err != nil {
+		return "", fmt.Errorf("add item %q to %s: %w", item.Title, entityID, err)
+	}
+	return uid, nil
+}
+
+// diffNewItemUID returns the UID of the item present in after but not in
+// before. If more than one such item exists (e.g. a concurrent change from
+// outside the sync engine added another item at the same time), the one
+// matching title is preferred; otherwise the first candidate is returned.
+func diffNewItemUID(before, after []model.Item, title string) (string, bool) {
+	beforeUIDs := make(map[string]struct{}, len(before))
+	for _, it := range before {
+		beforeUIDs[it.UID] = struct{}{}
+	}
+
+	var candidates []model.Item
+	for _, it := range after {
+		if _, existed := beforeUIDs[it.UID]; !existed {
+			candidates = append(candidates, it)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return "", false
+	}
+	for _, c := range candidates {
+		if c.Title == title {
+			return c.UID, true
+		}
+	}
+	return candidates[0].UID, true
 }
 
 // UpdateItem updates an existing todo item in HA. haUID is the item's HA UID
@@ -233,13 +297,13 @@ func (a *Adapter) UpdateItem(ctx context.Context, entityID, haUID, currentTitle 
 	data := buildUpdateItemData(entityID, identifier, currentTitle, item, features)
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceUpdateItem, serviceBody(data))
-	})
+	}, nil)
 	if err != nil && identifier != currentTitle {
 		a.logger.Debug("update by UID failed, retrying by title", "uid", haUID, "title", currentTitle, "error", err)
 		data = buildUpdateItemData(entityID, currentTitle, currentTitle, item, features)
 		err = Retry(ctx, defaultMaxAttempts, func() error {
 			return a.rest.CallService(ctx, domainTodo, serviceUpdateItem, serviceBody(data))
-		})
+		}, nil)
 	}
 	if err != nil {
 		return fmt.Errorf("update item %q in %s: %w", currentTitle, entityID, err)
@@ -258,13 +322,13 @@ func (a *Adapter) RemoveItem(ctx context.Context, entityID, haUID, title string)
 	data := buildRemoveItemData(entityID, identifier)
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceRemoveItem, serviceBody(data))
-	})
+	}, nil)
 	if err != nil && identifier != title {
 		a.logger.Debug("remove by UID failed, retrying by title", "uid", haUID, "title", title, "error", err)
 		data = buildRemoveItemData(entityID, title)
 		err = Retry(ctx, defaultMaxAttempts, func() error {
 			return a.rest.CallService(ctx, domainTodo, serviceRemoveItem, serviceBody(data))
-		})
+		}, nil)
 	}
 	if err != nil {
 		return fmt.Errorf("remove item %q from %s: %w", title, entityID, err)

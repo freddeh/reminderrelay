@@ -559,6 +559,104 @@ func TestReconcile_CompletedStatusChange(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario: Untracked items on both sides with matching title → linked, not duplicated
+// ---------------------------------------------------------------------------
+
+func TestReconcile_UntrackedMatchingTitles_LinksInsteadOfDuplicating(t *testing.T) {
+	now := time.Now().UTC()
+
+	remItem := newItem("rem-1", "Buy Milk", "Shopping", model.PriorityNone, false, now)
+	rem := newMockReminders(remItem)
+
+	ha := newMockHA()
+	ha.addItems("todo.shopping", model.Item{UID: "ha-1", Title: "buy milk", ModifiedAt: now})
+
+	store := newMockStore()
+
+	r := NewReconciler(rem, ha, store, testLogger)
+	stats, err := r.Run(context.Background(), testMappings)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if stats.Created != 0 {
+		t.Errorf("Created = %d, want 0 (matching titles should be linked, not created)", stats.Created)
+	}
+
+	// Neither side should have gained a new item.
+	if rem.count() != 1 {
+		t.Errorf("Reminders items = %d, want 1", rem.count())
+	}
+	if len(ha.getItems("todo.shopping")) != 1 {
+		t.Errorf("HA items = %d, want 1", len(ha.getItems("todo.shopping")))
+	}
+
+	// Exactly one linked state entry, pointing at both UIDs.
+	all, err := store.GetAllItemsForList(context.Background(), "Shopping")
+	if err != nil {
+		t.Fatalf("GetAllItemsForList: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("state items = %d, want 1", len(all))
+	}
+	if all[0].RemindersUID != "rem-1" || all[0].HAUID != "ha-1" {
+		t.Errorf("linked item = %+v, want RemindersUID=rem-1 HAUID=ha-1", all[0])
+	}
+}
+
+func TestReconcile_UntrackedDuplicateTitles_OnlyOneLinked(t *testing.T) {
+	now := time.Now().UTC()
+
+	rem := newMockReminders(
+		newItem("rem-1", "Buy milk", "Shopping", model.PriorityNone, false, now),
+		newItem("rem-2", "Buy milk", "Shopping", model.PriorityNone, false, now),
+	)
+
+	ha := newMockHA()
+	ha.addItems("todo.shopping", model.Item{UID: "ha-1", Title: "Buy milk", ModifiedAt: now})
+
+	store := newMockStore()
+
+	r := NewReconciler(rem, ha, store, testLogger)
+	stats, err := r.Run(context.Background(), testMappings)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// One of the two same-titled Reminders items links to the sole HA item;
+	// the other, since no HA counterpart remains, is created in HA normally.
+	if stats.Created != 1 {
+		t.Errorf("Created = %d, want 1", stats.Created)
+	}
+	if len(ha.getItems("todo.shopping")) != 2 {
+		t.Errorf("HA items = %d, want 2 (one original + one created for the unmatched duplicate)", len(ha.getItems("todo.shopping")))
+	}
+
+	all, err := store.GetAllItemsForList(context.Background(), "Shopping")
+	if err != nil {
+		t.Fatalf("GetAllItemsForList: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("state items = %d, want 2", len(all))
+	}
+
+	// Exactly one of rem-1/rem-2 should be linked to the pre-existing ha-1;
+	// the sort in reconcileList makes this deterministic (lowest UID wins).
+	var linkedToExisting int
+	for _, si := range all {
+		if si.HAUID == "ha-1" {
+			linkedToExisting++
+			if si.RemindersUID != "rem-1" {
+				t.Errorf("expected rem-1 (lowest UID) to link to ha-1, got %s", si.RemindersUID)
+			}
+		}
+	}
+	if linkedToExisting != 1 {
+		t.Errorf("items linked to ha-1 = %d, want 1", linkedToExisting)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // mergeField / mergeDueDate unit tests
 // ---------------------------------------------------------------------------
 

@@ -30,7 +30,11 @@ type RemindersSource interface {
 // Implemented by [homeassistant.Adapter].
 type HASource interface {
 	GetItems(ctx context.Context, entityID string) ([]model.Item, error)
-	AddItem(ctx context.Context, entityID string, item *model.Item) error
+	// AddItem returns the newly created item's HA UID, diffed from
+	// todo.get_items before/after the add rather than re-fetched and matched
+	// by title afterwards — title-based matching could pick the wrong item
+	// when titles collide, or silently link to an unrelated one.
+	AddItem(ctx context.Context, entityID string, item *model.Item) (uid string, err error)
 	// UpdateItem and RemoveItem target the item by haUID when known (falling
 	// back to currentTitle/title internally if the HA version doesn't
 	// resolve UIDs); haUID may be empty for items not yet tracked with one.

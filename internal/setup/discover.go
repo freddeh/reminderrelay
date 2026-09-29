@@ -68,6 +68,19 @@ type haStateEntry struct {
 // DiscoverHATodoEntities fetches all entities from Home Assistant and returns
 // those in the "todo" domain, sorted alphabetically by entity ID.
 func DiscoverHATodoEntities(ctx context.Context, haURL, haToken string) ([]HAEntity, error) {
+	return discoverHAEntitiesByDomain(ctx, haURL, haToken, "todo.")
+}
+
+// DiscoverHACalendarEntities fetches all entities from Home Assistant and
+// returns those in the "calendar" domain, sorted alphabetically by entity
+// ID. Used to offer calendar due-date mirroring during setup — see
+// README.md's calendar mirroring section for why "local_calendar" entities
+// specifically are the recommended (and only fully tested) choice.
+func DiscoverHACalendarEntities(ctx context.Context, haURL, haToken string) ([]HAEntity, error) {
+	return discoverHAEntitiesByDomain(ctx, haURL, haToken, "calendar.")
+}
+
+func discoverHAEntitiesByDomain(ctx context.Context, haURL, haToken, prefix string) ([]HAEntity, error) {
 	endpoint := strings.TrimRight(haURL, "/") + "/api/states"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -92,7 +105,7 @@ func DiscoverHATodoEntities(ctx context.Context, haURL, haToken string) ([]HAEnt
 
 	var entities []HAEntity
 	for _, s := range states {
-		if strings.HasPrefix(s.EntityID, "todo.") {
+		if strings.HasPrefix(s.EntityID, prefix) {
 			entities = append(entities, HAEntity{
 				EntityID:     s.EntityID,
 				FriendlyName: s.Attributes.FriendlyName,

@@ -10,6 +10,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/njoerd114/reminderrelay/internal/model"
 )
 
 const (
@@ -37,22 +39,29 @@ type HAConnector interface {
 type Engine struct {
 	reconciler   *Reconciler
 	haConn       HAConnector
-	listMappings map[string]string
+	listMappings map[string]model.ListMapping
 	pollInterval time.Duration
 	log          *slog.Logger
 
+	// needsWS is true when at least one list mapping has a calendar entity
+	// configured — calendar event update/delete are WebSocket-only (see
+	// [homeassistant.Adapter.UpdateCalendarEvent]), so RunOnce needs to
+	// connect the WebSocket even outside daemon mode, where it's normally
+	// only opened for SubscribeChanges.
+	needsWS bool
+
 	// OTel instruments — always non-nil (no-op when telemetry is disabled).
-	tracer     trace.Tracer
-	cntCreated metric.Int64Counter
-	cntUpdated metric.Int64Counter
-	cntDeleted metric.Int64Counter
+	tracer       trace.Tracer
+	cntCreated   metric.Int64Counter
+	cntUpdated   metric.Int64Counter
+	cntDeleted   metric.Int64Counter
 	cntConflicts metric.Int64Counter
-	cntErrors  metric.Int64Counter
+	cntErrors    metric.Int64Counter
 }
 
 // NewEngine creates an Engine. If haConn is nil, WebSocket subscriptions are
 // skipped and the engine runs polling-only.
-func NewEngine(reconciler *Reconciler, haConn HAConnector, listMappings map[string]string, pollInterval time.Duration, logger *slog.Logger) *Engine {
+func NewEngine(reconciler *Reconciler, haConn HAConnector, listMappings map[string]model.ListMapping, pollInterval time.Duration, logger *slog.Logger) *Engine {
 	tracer := otel.Tracer(otelScope)
 	meter := otel.Meter(otelScope)
 
@@ -65,11 +74,20 @@ func NewEngine(reconciler *Reconciler, haConn HAConnector, listMappings map[stri
 		return c
 	}
 
+	needsWS := false
+	for _, m := range listMappings {
+		if m.HACalendarEntity != "" {
+			needsWS = true
+			break
+		}
+	}
+
 	return &Engine{
 		reconciler:   reconciler,
 		haConn:       haConn,
 		listMappings: listMappings,
 		pollInterval: pollInterval,
+		needsWS:      needsWS,
 		log:          logger,
 
 		tracer:       tracer,
@@ -85,6 +103,15 @@ func NewEngine(reconciler *Reconciler, haConn HAConnector, listMappings map[stri
 func (e *Engine) reconcile(ctx context.Context) (Stats, error) {
 	ctx, span := e.tracer.Start(ctx, spanReconcile)
 	defer span.End()
+
+	// Calendar mirroring needs the WebSocket connection (event update/delete
+	// aren't REST services). Connect is idempotent, so this is a no-op once
+	// SubscribeChanges (daemon mode) has already connected it.
+	if e.needsWS && e.haConn != nil {
+		if err := e.haConn.Connect(ctx); err != nil {
+			e.log.Warn("could not connect WebSocket for calendar mirroring, mirrored due dates will not update this pass", "error", err)
+		}
+	}
 
 	stats, err := e.reconciler.Run(ctx, e.listMappings)
 
@@ -134,14 +161,14 @@ func (e *Engine) Run(ctx context.Context) error {
 			defer func() { _ = e.haConn.Close() }()
 
 			entityIDs := make([]string, 0, len(e.listMappings))
-			for _, id := range e.listMappings {
-				entityIDs = append(entityIDs, id)
+			for _, m := range e.listMappings {
+				entityIDs = append(entityIDs, m.HAEntity)
 			}
 
-			// Build reverse mapping: entityID → listName.
+			// Build reverse mapping: entityID → (listName, mapping).
 			entityToList := make(map[string]string, len(e.listMappings))
-			for listName, entityID := range e.listMappings {
-				entityToList[entityID] = listName
+			for listName, m := range e.listMappings {
+				entityToList[m.HAEntity] = listName
 			}
 
 			go func() {
@@ -151,7 +178,7 @@ func (e *Engine) Run(ctx context.Context) error {
 						return
 					}
 					e.log.Info("WS event triggered reconcile", "entity_id", entityID)
-					if _, err := e.reconciler.ReconcileEntity(ctx, listName, entityID); err != nil {
+					if _, err := e.reconciler.ReconcileEntity(ctx, listName, e.listMappings[listName]); err != nil {
 						e.log.Error("WS-triggered reconcile failed", "entity_id", entityID, "error", err)
 					}
 				})

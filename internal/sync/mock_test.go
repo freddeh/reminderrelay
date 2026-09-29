@@ -12,8 +12,8 @@ import (
 // --- Mock Reminders Source ---------------------------------------------------
 
 type mockReminders struct {
-	mu    sync.Mutex
-	items map[string]*model.Item // UID → Item
+	mu      sync.Mutex
+	items   map[string]*model.Item // UID → Item
 	nextUID int
 }
 
@@ -135,37 +135,53 @@ func (m *mockHA) AddItem(_ context.Context, entityID string, item *model.Item) e
 	return nil
 }
 
-func (m *mockHA) UpdateItem(_ context.Context, entityID, currentTitle string, item *model.Item) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	items := m.items[entityID]
-	for i, h := range items {
-		if h.Title == currentTitle {
-			items[i].Title = item.Title
-			items[i].Description = item.Description
-			items[i].DueDate = item.DueDate
-			items[i].Priority = item.Priority
-			items[i].Completed = item.Completed
-			items[i].ModifiedAt = item.ModifiedAt
-			return nil
+// findByUIDOrTitle mirrors HA's real todo service resolution
+// (_find_by_uid_or_summary): match by UID first if given, else by title.
+func findByUIDOrTitle(items []model.Item, uid, title string) int {
+	if uid != "" {
+		for i, h := range items {
+			if h.UID == uid {
+				return i
+			}
 		}
 	}
-	return fmt.Errorf("item %q not found in %s", currentTitle, entityID)
-}
-
-func (m *mockHA) RemoveItem(_ context.Context, entityID, title string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	items := m.items[entityID]
 	for i, h := range items {
 		if h.Title == title {
-			m.items[entityID] = append(items[:i], items[i+1:]...)
-			return nil
+			return i
 		}
 	}
-	return fmt.Errorf("item %q not found in %s", title, entityID)
+	return -1
+}
+
+func (m *mockHA) UpdateItem(_ context.Context, entityID, haUID, currentTitle string, item *model.Item) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	items := m.items[entityID]
+	i := findByUIDOrTitle(items, haUID, currentTitle)
+	if i < 0 {
+		return fmt.Errorf("item %q (uid=%q) not found in %s", currentTitle, haUID, entityID)
+	}
+	items[i].Title = item.Title
+	items[i].Description = item.Description
+	items[i].DueDate = item.DueDate
+	items[i].Priority = item.Priority
+	items[i].Completed = item.Completed
+	items[i].ModifiedAt = item.ModifiedAt
+	return nil
+}
+
+func (m *mockHA) RemoveItem(_ context.Context, entityID, haUID, title string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	items := m.items[entityID]
+	i := findByUIDOrTitle(items, haUID, title)
+	if i < 0 {
+		return fmt.Errorf("item %q (uid=%q) not found in %s", title, haUID, entityID)
+	}
+	m.items[entityID] = append(items[:i], items[i+1:]...)
+	return nil
 }
 
 func (m *mockHA) getItems(entityID string) []model.Item {
@@ -174,11 +190,120 @@ func (m *mockHA) getItems(entityID string) []model.Item {
 	return m.items[entityID]
 }
 
+// --- Mock Calendar Source ------------------------------------------------
+
+// mockHACalendar embeds *mockHA (satisfying HASource) and adds CalendarSource
+// methods, so [NewReconciler]'s type assertion picks it up for calendar
+// mirroring tests. mockHA alone deliberately does NOT implement
+// CalendarSource, so non-calendar tests exercise the "mirroring disabled"
+// path the same way a plain HASource-only adapter would.
+type mockHACalendar struct {
+	*mockHA
+
+	mu       sync.Mutex
+	events   map[string]map[string]*model.Item // entityID -> uid -> mirrored item
+	nextUID  int
+	mutable  bool // CalendarSupportsMutation return value
+	failNext bool // forces the next Create/Update call to fail, once
+	listFail bool // forces ListCalendarEvents to fail
+}
+
+func newMockHACalendar() *mockHACalendar {
+	return &mockHACalendar{
+		mockHA:  newMockHA(),
+		events:  make(map[string]map[string]*model.Item),
+		mutable: true,
+	}
+}
+
+func (m *mockHACalendar) CalendarSupportsMutation(_ context.Context, _ string) (bool, error) {
+	return m.mutable, nil
+}
+
+func (m *mockHACalendar) ListCalendarEvents(_ context.Context, entityID string) ([]model.CalendarEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.listFail {
+		return nil, fmt.Errorf("simulated list failure")
+	}
+
+	events := make([]model.CalendarEvent, 0, len(m.events[entityID]))
+	for uid, item := range m.events[entityID] {
+		events = append(events, model.CalendarEvent{UID: uid, DueDate: item.DueDate})
+	}
+	return events, nil
+}
+
+func (m *mockHACalendar) CreateCalendarEvent(_ context.Context, entityID string, item *model.Item) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.failNext {
+		m.failNext = false
+		return "", fmt.Errorf("simulated create failure")
+	}
+
+	m.nextUID++
+	uid := fmt.Sprintf("cal-%d", m.nextUID)
+	cp := *item
+	if m.events[entityID] == nil {
+		m.events[entityID] = make(map[string]*model.Item)
+	}
+	m.events[entityID][uid] = &cp
+	return uid, nil
+}
+
+func (m *mockHACalendar) UpdateCalendarEvent(_ context.Context, entityID, uid string, item *model.Item) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.failNext {
+		m.failNext = false
+		return fmt.Errorf("simulated update failure")
+	}
+
+	events := m.events[entityID]
+	if events == nil || events[uid] == nil {
+		return fmt.Errorf("calendar event %q not found on %s", uid, entityID)
+	}
+	cp := *item
+	events[uid] = &cp
+	return nil
+}
+
+func (m *mockHACalendar) DeleteCalendarEvent(_ context.Context, entityID, uid string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	events := m.events[entityID]
+	if events == nil || events[uid] == nil {
+		return fmt.Errorf("calendar event %q not found on %s", uid, entityID)
+	}
+	delete(events, uid)
+	return nil
+}
+
+func (m *mockHACalendar) getEvent(entityID, uid string) *model.Item {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.events[entityID] == nil {
+		return nil
+	}
+	return m.events[entityID][uid]
+}
+
+func (m *mockHACalendar) eventCount(entityID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.events[entityID])
+}
+
 // --- Mock State Store --------------------------------------------------------
 
 type mockStore struct {
-	mu    sync.Mutex
-	items map[int64]*state.Item
+	mu     sync.Mutex
+	items  map[int64]*state.Item
 	nextID int64
 }
 

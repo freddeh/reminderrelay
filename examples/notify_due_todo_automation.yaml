@@ -1,0 +1,40 @@
+# ReminderRelay example: notify ahead of a due to-do item.
+#
+# The HA `todo` domain has no due-date automation trigger at all — this is
+# exactly why ReminderRelay's optional calendar mirroring exists (see
+# README.md's "Calendar Mirroring" section). A mirrored due date becomes a
+# real calendar event, and HA's `calendar` domain *does* have a trigger that
+# fires relative to an event's start time, with an `offset`.
+#
+# Requires: calendar mirroring enabled for the list you want notifications
+# for (an `ha_calendar_entity` set on that list's mapping in ReminderRelay's
+# config).
+#
+# Install: Settings → Automations & Scenes → Automations → ⋮ → Edit in YAML,
+# paste this in (or add it as its own entry in automations.yaml). Replace
+# `entity_id` and the `notify.*` action with your own calendar entity and
+# notification target.
+
+alias: "ReminderRelay: notify on to-do due soon"
+description: >-
+  Sends a notification ahead of a mirrored reminder's due time, using the
+  Home Assistant calendar entity ReminderRelay mirrors due-dated items onto.
+triggers:
+  - trigger: calendar
+    entity_id: calendar.work_due_dates # ← replace with your mirrored calendar entity
+    event: start
+    offset: "-00:15:00" # notify 15 minutes before the due time; use "00:00:00" to notify exactly at it
+conditions:
+  # ReminderRelay marks a mirrored event "[Done] <title>" on completion
+  # rather than deleting it (so completed items still show on the calendar
+  # as history) — skip notifying for those.
+  - condition: template
+    value_template: "{{ not trigger.calendar_event.summary.startswith('[Done] ') }}"
+actions:
+  - action: notify.notify # ← replace with a specific target, e.g. notify.mobile_app_your_phone
+    data:
+      title: "Due soon: {{ trigger.calendar_event.summary }}"
+      message: >-
+        "{{ trigger.calendar_event.summary }}" is due
+        {{ as_timestamp(trigger.calendar_event.start) | timestamp_custom('%-I:%M %p on %A') }}.
+mode: parallel

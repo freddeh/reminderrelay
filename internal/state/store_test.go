@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -64,6 +65,65 @@ func TestOpen_Idempotent(t *testing.T) {
 	}
 }
 
+// TestMigrate_AddsColumnsToPreExistingDatabase simulates a database created
+// before calendar mirroring and the field-level merge snapshot columns
+// existed, and verifies Open migrates it in place without data loss.
+func TestMigrate_AddsColumnsToPreExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-schema.db")
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("opening raw db: %v", err)
+	}
+	const oldSchema = `
+CREATE TABLE sync_items (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    reminders_uid      TEXT    NOT NULL DEFAULT '',
+    ha_uid             TEXT    NOT NULL DEFAULT '',
+    list_name          TEXT    NOT NULL,
+    title              TEXT    NOT NULL,
+    last_sync_hash     TEXT    NOT NULL DEFAULT '',
+    reminders_modified TEXT    NOT NULL DEFAULT '',
+    ha_modified        TEXT    NOT NULL DEFAULT '',
+    last_synced_at     TEXT    NOT NULL DEFAULT ''
+);
+INSERT INTO sync_items (reminders_uid, ha_uid, list_name, title, last_sync_hash, reminders_modified, ha_modified, last_synced_at)
+VALUES ('rem-1', 'ha-1', 'Shopping', 'Pre-existing item', 'oldhash', '', '', '');
+`
+	if _, err := db.Exec(oldSchema); err != nil {
+		t.Fatalf("seeding old schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing raw db: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on pre-existing old-schema database: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	got, err := s.GetItemByRemindersUID(context.Background(), "rem-1")
+	if err != nil {
+		t.Fatalf("GetItemByRemindersUID: %v", err)
+	}
+	if got == nil {
+		t.Fatal("pre-existing row should survive migration")
+	}
+	if got.Title != "Pre-existing item" || got.LastSyncHash != "oldhash" {
+		t.Errorf("got %+v, want title=%q hash=%q", got, "Pre-existing item", "oldhash")
+	}
+	if got.CalendarEventUID != "" || got.SyncedDueDate != "" {
+		t.Errorf("new columns should default to empty on migrated rows, got %+v", got)
+	}
+
+	// The new columns must also be writable after migration.
+	got.CalendarEventUID = "cal-99"
+	if err := s.UpsertItem(context.Background(), got); err != nil {
+		t.Fatalf("UpsertItem after migration: %v", err)
+	}
+}
+
 func TestUpsertAndGetByRemindersUID(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -88,6 +148,54 @@ func TestUpsertAndGetByRemindersUID(t *testing.T) {
 	}
 	if got.HAUID != "ha-uid-001" {
 		t.Errorf("HAUID = %q, want %q", got.HAUID, "ha-uid-001")
+	}
+}
+
+func TestUpsertAndGet_RoundTripsCalendarAndMergeSnapshotFields(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	item := sampleItem()
+	item.CalendarEventUID = "cal-1"
+	item.SyncedDescription = "some notes"
+	item.SyncedDueDate = "2026-06-01T00:00:00Z"
+	item.SyncedPriority = 1
+	item.SyncedCompleted = true
+	item.HALastSeenHash = "ha-seen-hash"
+	item.CalendarSyncHash = "cal-sync-hash"
+
+	if err := s.UpsertItem(ctx, item); err != nil {
+		t.Fatalf("UpsertItem: %v", err)
+	}
+
+	got, err := s.GetItemByRemindersUID(ctx, item.RemindersUID)
+	if err != nil {
+		t.Fatalf("GetItemByRemindersUID: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected item, got nil")
+	}
+
+	if got.CalendarEventUID != "cal-1" {
+		t.Errorf("CalendarEventUID = %q, want %q", got.CalendarEventUID, "cal-1")
+	}
+	if got.SyncedDescription != "some notes" {
+		t.Errorf("SyncedDescription = %q, want %q", got.SyncedDescription, "some notes")
+	}
+	if got.SyncedDueDate != "2026-06-01T00:00:00Z" {
+		t.Errorf("SyncedDueDate = %q, want %q", got.SyncedDueDate, "2026-06-01T00:00:00Z")
+	}
+	if got.SyncedPriority != 1 {
+		t.Errorf("SyncedPriority = %d, want 1", got.SyncedPriority)
+	}
+	if !got.SyncedCompleted {
+		t.Error("SyncedCompleted = false, want true")
+	}
+	if got.HALastSeenHash != "ha-seen-hash" {
+		t.Errorf("HALastSeenHash = %q, want %q", got.HALastSeenHash, "ha-seen-hash")
+	}
+	if got.CalendarSyncHash != "cal-sync-hash" {
+		t.Errorf("CalendarSyncHash = %q, want %q", got.CalendarSyncHash, "cal-sync-hash")
 	}
 }
 

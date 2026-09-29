@@ -3,6 +3,8 @@ package model
 import (
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ---------------------------------------------------------------------------
@@ -126,6 +128,35 @@ func TestContentHash_NilDueDate(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// CalendarHash
+// ---------------------------------------------------------------------------
+
+func TestCalendarHash_IgnoresDescriptionAndPriority(t *testing.T) {
+	due := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	a := &Item{Title: "Task", DueDate: &due, Priority: PriorityHigh, Description: "notes A"}
+	b := &Item{Title: "Task", DueDate: &due, Priority: PriorityLow, Description: "notes B"}
+	if a.CalendarHash() != b.CalendarHash() {
+		t.Error("CalendarHash should be unaffected by Description/Priority differences")
+	}
+}
+
+func TestCalendarHash_DiffersOnDueDateOrCompleted(t *testing.T) {
+	due1 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	due2 := time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
+
+	base := &Item{Title: "Task", DueDate: &due1, Completed: false}
+	diffDue := &Item{Title: "Task", DueDate: &due2, Completed: false}
+	diffCompleted := &Item{Title: "Task", DueDate: &due1, Completed: true}
+
+	if base.CalendarHash() == diffDue.CalendarHash() {
+		t.Error("CalendarHash should differ when DueDate changes")
+	}
+	if base.CalendarHash() == diffCompleted.CalendarHash() {
+		t.Error("CalendarHash should differ when Completed changes")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Priority prefix encoding / decoding
 // ---------------------------------------------------------------------------
 
@@ -170,6 +201,58 @@ func TestDecodePriorityPrefix(t *testing.T) {
 			t.Errorf("DecodePriorityPrefix(%q) = (%v, %q), want (%v, %q)",
 				tt.input, gotP, gotDesc, tt.wantP, tt.wantDesc)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ListMapping YAML (short/long form)
+// ---------------------------------------------------------------------------
+
+func TestListMapping_UnmarshalShortForm(t *testing.T) {
+	var m ListMapping
+	if err := yaml.Unmarshal([]byte(`todo.shopping`), &m); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.HAEntity != "todo.shopping" || m.HACalendarEntity != "" {
+		t.Errorf("got %+v, want {todo.shopping, \"\"}", m)
+	}
+}
+
+func TestListMapping_UnmarshalLongForm(t *testing.T) {
+	var m ListMapping
+	input := "ha_entity: todo.work\nha_calendar_entity: calendar.work_due\n"
+	if err := yaml.Unmarshal([]byte(input), &m); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.HAEntity != "todo.work" || m.HACalendarEntity != "calendar.work_due" {
+		t.Errorf("got %+v, want {todo.work, calendar.work_due}", m)
+	}
+}
+
+func TestListMapping_MarshalShortFormWhenNoCalendar(t *testing.T) {
+	m := ListMapping{HAEntity: "todo.shopping"}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := string(out); got != "todo.shopping\n" {
+		t.Errorf("got %q, want %q", got, "todo.shopping\n")
+	}
+}
+
+func TestListMapping_MarshalLongFormWhenCalendarSet(t *testing.T) {
+	m := ListMapping{HAEntity: "todo.work", HACalendarEntity: "calendar.work_due"}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var roundTripped ListMapping
+	if err := yaml.Unmarshal(out, &roundTripped); err != nil {
+		t.Fatalf("unmarshalling marshalled output: %v", err)
+	}
+	if roundTripped != m {
+		t.Errorf("round-trip = %+v, want %+v", roundTripped, m)
 	}
 }
 

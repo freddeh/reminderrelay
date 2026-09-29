@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	haclient "github.com/mkelcik/go-ha-client/v2"
 
@@ -27,6 +29,13 @@ type RESTClient interface {
 	// CallServiceWithResponse POSTs with ?return_response=true. Used for
 	// todo.get_items which returns data.
 	CallServiceWithResponse(ctx context.Context, domain, service string, body io.Reader) (haclient.ServiceCallResponse, error)
+	// GetStateAttributes returns the attributes map from an entity's current
+	// state (GET /api/states/<entity_id>). Used to read supported_features
+	// for capability detection.
+	GetStateAttributes(ctx context.Context, entityID string) (map[string]interface{}, error)
+	// GetCalendarEvents returns events for a calendar entity in [from, to]
+	// (GET /api/calendars/<entity_id>), including each event's uid.
+	GetCalendarEvents(ctx context.Context, entityID string, from, to time.Time) (haclient.CalendarEvents, error)
 }
 
 // haClientWrapper wraps [haclient.Client] and adds a plain CallService method
@@ -84,6 +93,18 @@ func (w *haClientWrapper) CallServiceWithResponse(ctx context.Context, domain, s
 	return w.client.CallServiceWithResponse(ctx, domain, service, body)
 }
 
+func (w *haClientWrapper) GetStateAttributes(ctx context.Context, entityID string) (map[string]interface{}, error) {
+	state, err := w.client.GetStateForEntity(ctx, entityID)
+	if err != nil {
+		return nil, err
+	}
+	return state.Attributes, nil
+}
+
+func (w *haClientWrapper) GetCalendarEvents(ctx context.Context, entityID string, from, to time.Time) (haclient.CalendarEvents, error) {
+	return w.client.GetCalendarEvents(ctx, entityID, from, to)
+}
+
 // Adapter provides sync-engine–oriented operations on Home Assistant todo
 // lists via the REST and WebSocket APIs. Create one with [NewAdapter] or
 // [NewAdapterWithClient].
@@ -91,6 +112,9 @@ type Adapter struct {
 	rest   RESTClient
 	ws     *haclient.WSClient
 	logger *slog.Logger
+
+	featuresMu sync.Mutex
+	features   map[string]int // entity_id -> supported_features, cached for the adapter's lifetime
 }
 
 // NewAdapter creates an Adapter backed by real HA REST and WebSocket clients.
@@ -178,9 +202,12 @@ func (a *Adapter) GetItems(ctx context.Context, entityID string) ([]model.Item, 
 }
 
 // AddItem creates a new todo item in the given HA entity. The item's Priority
-// is encoded as a description prefix automatically.
+// is encoded as a description prefix automatically. A due date with a
+// time-of-day is sent as due_datetime when the entity supports it, else it
+// falls back to a date-only due_date (see [setDueFields]).
 func (a *Adapter) AddItem(ctx context.Context, entityID string, item *model.Item) error {
-	data := buildAddItemData(entityID, item)
+	features := a.entityFeaturesOrZero(ctx, entityID)
+	data := buildAddItemData(entityID, item, features)
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceAddItem, serviceBody(data))
 	})
@@ -190,29 +217,111 @@ func (a *Adapter) AddItem(ctx context.Context, entityID string, item *model.Item
 	return nil
 }
 
-// UpdateItem updates an existing todo item in HA. currentTitle is the item's
-// title as it currently exists in HA, used to identify the target item.
-func (a *Adapter) UpdateItem(ctx context.Context, entityID, currentTitle string, item *model.Item) error {
-	data := buildUpdateItemData(entityID, currentTitle, item)
+// UpdateItem updates an existing todo item in HA. haUID is the item's HA UID
+// if known (empty if not yet tracked); currentTitle is the item's title as
+// it currently exists in HA. The item is targeted by UID first — recent HA
+// core versions resolve either a UID or a title in the "item" field — and,
+// if that's rejected (e.g. an older HA core that only matches by title),
+// falls back to targeting by currentTitle.
+func (a *Adapter) UpdateItem(ctx context.Context, entityID, haUID, currentTitle string, item *model.Item) error {
+	features := a.entityFeaturesOrZero(ctx, entityID)
+
+	identifier := currentTitle
+	if haUID != "" {
+		identifier = haUID
+	}
+	data := buildUpdateItemData(entityID, identifier, currentTitle, item, features)
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceUpdateItem, serviceBody(data))
 	})
+	if err != nil && identifier != currentTitle {
+		a.logger.Debug("update by UID failed, retrying by title", "uid", haUID, "title", currentTitle, "error", err)
+		data = buildUpdateItemData(entityID, currentTitle, currentTitle, item, features)
+		err = Retry(ctx, defaultMaxAttempts, func() error {
+			return a.rest.CallService(ctx, domainTodo, serviceUpdateItem, serviceBody(data))
+		})
+	}
 	if err != nil {
 		return fmt.Errorf("update item %q in %s: %w", currentTitle, entityID, err)
 	}
 	return nil
 }
 
-// RemoveItem deletes a todo item from HA by its current title.
-func (a *Adapter) RemoveItem(ctx context.Context, entityID, title string) error {
-	data := buildRemoveItemData(entityID, title)
+// RemoveItem deletes a todo item from HA. haUID is the item's HA UID if
+// known; title is its current title. Targeting works the same way as
+// [Adapter.UpdateItem]: UID first, falling back to title on failure.
+func (a *Adapter) RemoveItem(ctx context.Context, entityID, haUID, title string) error {
+	identifier := title
+	if haUID != "" {
+		identifier = haUID
+	}
+	data := buildRemoveItemData(entityID, identifier)
 	err := Retry(ctx, defaultMaxAttempts, func() error {
 		return a.rest.CallService(ctx, domainTodo, serviceRemoveItem, serviceBody(data))
 	})
+	if err != nil && identifier != title {
+		a.logger.Debug("remove by UID failed, retrying by title", "uid", haUID, "title", title, "error", err)
+		data = buildRemoveItemData(entityID, title)
+		err = Retry(ctx, defaultMaxAttempts, func() error {
+			return a.rest.CallService(ctx, domainTodo, serviceRemoveItem, serviceBody(data))
+		})
+	}
 	if err != nil {
 		return fmt.Errorf("remove item %q from %s: %w", title, entityID, err)
 	}
 	return nil
+}
+
+// entitySupportedFeatures returns entityID's supported_features bitmask, as
+// reported by its current HA state, cached for the adapter's lifetime (an
+// entity's declared features don't change at runtime).
+func (a *Adapter) entitySupportedFeatures(ctx context.Context, entityID string) (int, error) {
+	a.featuresMu.Lock()
+	if f, ok := a.features[entityID]; ok {
+		a.featuresMu.Unlock()
+		return f, nil
+	}
+	a.featuresMu.Unlock()
+
+	attrs, err := a.rest.GetStateAttributes(ctx, entityID)
+	if err != nil {
+		return 0, fmt.Errorf("fetching state for %s: %w", entityID, err)
+	}
+
+	features := 0
+	switch v := attrs["supported_features"].(type) {
+	case float64:
+		features = int(v)
+	case int:
+		features = v
+	}
+
+	a.featuresMu.Lock()
+	if a.features == nil {
+		a.features = make(map[string]int)
+	}
+	a.features[entityID] = features
+	a.featuresMu.Unlock()
+
+	return features, nil
+}
+
+// entityFeaturesOrZero is a convenience wrapper for call sites that should
+// degrade gracefully (fall back to the most conservative behaviour) rather
+// than fail outright when the feature probe itself errors.
+func (a *Adapter) entityFeaturesOrZero(ctx context.Context, entityID string) int {
+	features, err := a.entitySupportedFeatures(ctx, entityID)
+	if err != nil {
+		a.logger.Warn("could not determine entity supported_features, assuming none", "entity_id", entityID, "error", err)
+		return 0
+	}
+	return features
+}
+
+// CalendarSupportedFeatures returns the supported_features bitmask for a
+// calendar entity, using the same cache as the todo-entity feature probe.
+func (a *Adapter) CalendarSupportedFeatures(ctx context.Context, entityID string) (int, error) {
+	return a.entitySupportedFeatures(ctx, entityID)
 }
 
 // SubscribeChanges starts a WebSocket subscription for state_changed events

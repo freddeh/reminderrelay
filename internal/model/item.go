@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Priority represents the priority level of a task.
@@ -104,6 +106,77 @@ func (i *Item) ContentHash() string {
 	h.Write([]byte("|"))
 	_, _ = fmt.Fprintf(h, "%t", i.Completed)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// CalendarHash returns a deterministic SHA-256 hex digest of the fields
+// mirrored to a Home Assistant calendar event: title, due date, and
+// completed status. Unlike [Item.ContentHash], it deliberately excludes
+// Description and Priority, which have no representation on the calendar
+// side, so touching those fields alone doesn't trigger a calendar write.
+func (i *Item) CalendarHash() string {
+	h := sha256.New()
+	h.Write([]byte(i.Title))
+	h.Write([]byte("|"))
+	if i.DueDate != nil {
+		h.Write([]byte(i.DueDate.UTC().Format(time.RFC3339)))
+	}
+	h.Write([]byte("|"))
+	_, _ = fmt.Fprintf(h, "%t", i.Completed)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// CalendarEvent is a minimal read-back view of a mirrored due-date event on
+// a Home Assistant calendar entity — just enough for the 3-way due-date
+// merge in package sync to detect an edit made directly on the calendar.
+// It deliberately doesn't carry the event's title or description: those
+// aren't synced back from the calendar (see README.md's "Calendar
+// Mirroring" section — only the due date is a genuine bidirectional field).
+type CalendarEvent struct {
+	UID     string
+	DueDate *time.Time
+}
+
+// ListMapping pairs an Apple Reminders list with its Home Assistant todo
+// entity and, optionally, a Home Assistant calendar entity used to mirror
+// items that have a due date (see [Item.CalendarHash]).
+//
+// In YAML config, a ListMapping may be written as a plain string (just the
+// HA entity ID) for backward compatibility, or as a mapping with ha_entity
+// and ha_calendar_entity keys:
+//
+//	lists:
+//	  Groceries: todo.groceries                  # short form
+//	  Work:                                       # long form
+//	    ha_entity: todo.work_tasks
+//	    ha_calendar_entity: calendar.work_due_dates
+type ListMapping struct {
+	HAEntity         string `yaml:"ha_entity"`
+	HACalendarEntity string `yaml:"ha_calendar_entity,omitempty"`
+}
+
+// UnmarshalYAML accepts either a plain scalar string (short form, sets
+// HAEntity only) or a mapping node (long form, both fields).
+func (m *ListMapping) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		return value.Decode(&m.HAEntity)
+	}
+	type plain ListMapping
+	var p plain
+	if err := value.Decode(&p); err != nil {
+		return err
+	}
+	*m = ListMapping(p)
+	return nil
+}
+
+// MarshalYAML writes the short scalar form when no calendar entity is set,
+// and the long mapping form otherwise, keeping simple configs simple.
+func (m ListMapping) MarshalYAML() (interface{}, error) {
+	if m.HACalendarEntity == "" {
+		return m.HAEntity, nil
+	}
+	type plain ListMapping
+	return plain(m), nil
 }
 
 // --- Priority prefix encoding for Home Assistant descriptions ----------------

@@ -17,7 +17,18 @@ const (
 	statusNeedsAction = "needs_action"
 	statusCompleted   = "completed"
 
-	dateLayout = "2006-01-02"
+	dateLayout     = "2006-01-02"
+	dateTimeLayout = "2006-01-02 15:04:05"
+)
+
+// featureSetDueDateOnItem and featureSetDueDatetimeOnItem are bits from HA's
+// todo.TodoListEntityFeature enum (homeassistant/components/todo/const.py).
+// Sending due_datetime to an entity that doesn't declare
+// SET_DUE_DATETIME_ON_ITEM is rejected, so callers must check supported
+// features before choosing which field to send.
+const (
+	featureSetDueDateOnItem     = 16
+	featureSetDueDatetimeOnItem = 32
 )
 
 // haTodoItem is the JSON structure for a single item returned by the HA
@@ -60,7 +71,10 @@ func haItemToModelItem(h haTodoItem) model.Item {
 }
 
 // buildAddItemData returns the service-call payload for todo.add_item.
-func buildAddItemData(entityID string, item *model.Item) map[string]interface{} {
+// features is the target entity's supported_features bitmask (see
+// [featureSetDueDatetimeOnItem]); pass 0 if unknown, which falls back to the
+// date-only due_date field.
+func buildAddItemData(entityID string, item *model.Item, features int) map[string]interface{} {
 	data := map[string]interface{}{
 		"entity_id": entityID,
 		"item":      item.Title,
@@ -71,20 +85,21 @@ func buildAddItemData(entityID string, item *model.Item) map[string]interface{} 
 		data["description"] = desc
 	}
 
-	if item.DueDate != nil {
-		data["due_date"] = formatDue(item.DueDate)
-	}
+	setDueFields(data, item.DueDate, features)
 
 	return data
 }
 
 // buildUpdateItemData returns the service-call payload for todo.update_item.
-// currentTitle is the item's title as it currently exists in HA, used to
-// identify the item.
-func buildUpdateItemData(entityID, currentTitle string, item *model.Item) map[string]interface{} {
+// identifier is the value sent in the "item" field to select the target
+// item — either its HA UID or its current title (see [Adapter.UpdateItem]).
+// currentTitle is always the item's actual current title, used only to
+// decide whether a "rename" is needed, independent of which identifier was
+// used to target it.
+func buildUpdateItemData(entityID, identifier, currentTitle string, item *model.Item, features int) map[string]interface{} {
 	data := map[string]interface{}{
 		"entity_id": entityID,
-		"item":      currentTitle,
+		"item":      identifier,
 	}
 
 	if item.Title != currentTitle {
@@ -93,9 +108,7 @@ func buildUpdateItemData(entityID, currentTitle string, item *model.Item) map[st
 
 	data["description"] = model.EncodePriorityPrefix(item.Priority, item.Description)
 
-	if item.DueDate != nil {
-		data["due_date"] = formatDue(item.DueDate)
-	}
+	setDueFields(data, item.DueDate, features)
 
 	if item.Completed {
 		data["status"] = statusCompleted
@@ -104,6 +117,28 @@ func buildUpdateItemData(entityID, currentTitle string, item *model.Item) map[st
 	}
 
 	return data
+}
+
+// setDueFields sets either due_datetime or due_date on data, based on
+// whether dueDate carries a time-of-day and whether the target entity
+// declares SET_DUE_DATETIME_ON_ITEM support. A due date at exactly midnight
+// is treated as date-only — EventKit and HA both represent "no specific
+// time" as midnight, so an exact-midnight due time can't be distinguished
+// from "no time set" and is handled the same way as a date-only due date.
+func setDueFields(data map[string]interface{}, dueDate *time.Time, features int) {
+	if dueDate == nil {
+		return
+	}
+	if hasTimeComponent(*dueDate) && features&featureSetDueDatetimeOnItem != 0 {
+		data["due_datetime"] = dueDate.Format(dateTimeLayout)
+		return
+	}
+	data["due_date"] = formatDue(dueDate)
+}
+
+// hasTimeComponent reports whether t carries a non-midnight time-of-day.
+func hasTimeComponent(t time.Time) bool {
+	return t.Hour() != 0 || t.Minute() != 0 || t.Second() != 0
 }
 
 // buildRemoveItemData returns the service-call payload for todo.remove_item.

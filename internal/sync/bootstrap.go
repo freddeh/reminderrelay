@@ -59,7 +59,7 @@ type matchedPair struct {
 
 // Run checks whether the state DB is empty and, if so, performs the first-run
 // bootstrap. Returns true if bootstrap was executed, false if skipped.
-func (b *Bootstrap) Run(ctx context.Context, listMappings map[string]string) (bool, error) {
+func (b *Bootstrap) Run(ctx context.Context, listMappings map[string]model.ListMapping) (bool, error) {
 	empty, err := b.store.IsEmpty(ctx)
 	if err != nil {
 		return false, fmt.Errorf("checking state DB: %w", err)
@@ -90,13 +90,13 @@ func (b *Bootstrap) Run(ctx context.Context, listMappings map[string]string) (bo
 
 	// Match each list.
 	var results []matchResult
-	for listName, entityID := range listMappings {
-		haItems, err := b.ha.GetItems(ctx, entityID)
+	for listName, mapping := range listMappings {
+		haItems, err := b.ha.GetItems(ctx, mapping.HAEntity)
 		if err != nil {
-			return false, fmt.Errorf("fetching HA items for %s: %w", entityID, err)
+			return false, fmt.Errorf("fetching HA items for %s: %w", mapping.HAEntity, err)
 		}
 
-		result := matchByTitle(listName, entityID, remByList[listName], haItems)
+		result := matchByTitle(listName, mapping.HAEntity, remByList[listName], haItems)
 		results = append(results, result)
 	}
 
@@ -210,16 +210,24 @@ func (b *Bootstrap) execute(ctx context.Context, results []matchResult) error {
 	now := time.Now().UTC()
 
 	for _, r := range results {
-		// Write matched pairs.
+		// Write matched pairs. The Reminders side seeds the initial synced
+		// snapshot (consistent with Reminders being favoured on a tie
+		// elsewhere) — if the two sides actually differ in content despite
+		// sharing a title, the next reconcile pass's field-level merge will
+		// detect the HA side as "changed" and push Reminders' values to it.
 		for _, m := range r.matched {
 			si := &state.Item{
 				RemindersUID:      m.rem.UID,
 				HAUID:             m.ha.UID,
 				ListName:          r.listName,
 				Title:             m.rem.Title,
+				SyncedDescription: m.rem.Description,
+				SyncedDueDate:     dueDateKey(m.rem.DueDate),
+				SyncedPriority:    int(m.rem.Priority),
+				SyncedCompleted:   m.rem.Completed,
 				LastSyncHash:      m.rem.ContentHash(),
+				HALastSeenHash:    m.ha.ContentHash(),
 				RemindersModified: m.rem.ModifiedAt,
-				HAModified:        m.ha.ModifiedAt,
 				LastSyncedAt:      now,
 			}
 			if err := b.store.UpsertItem(ctx, si); err != nil {
@@ -252,7 +260,12 @@ func (b *Bootstrap) execute(ctx context.Context, results []matchResult) error {
 				HAUID:             haUID,
 				ListName:          r.listName,
 				Title:             item.Title,
+				SyncedDescription: item.Description,
+				SyncedDueDate:     dueDateKey(item.DueDate),
+				SyncedPriority:    int(item.Priority),
+				SyncedCompleted:   item.Completed,
 				LastSyncHash:      item.ContentHash(),
+				HALastSeenHash:    item.ContentHash(),
 				RemindersModified: item.ModifiedAt,
 				LastSyncedAt:      now,
 			}
@@ -270,13 +283,17 @@ func (b *Bootstrap) execute(ctx context.Context, results []matchResult) error {
 			}
 
 			si := &state.Item{
-				RemindersUID: uid,
-				HAUID:        item.UID,
-				ListName:     r.listName,
-				Title:        item.Title,
-				LastSyncHash: item.ContentHash(),
-				HAModified:   item.ModifiedAt,
-				LastSyncedAt: now,
+				RemindersUID:      uid,
+				HAUID:             item.UID,
+				ListName:          r.listName,
+				Title:             item.Title,
+				SyncedDescription: item.Description,
+				SyncedDueDate:     dueDateKey(item.DueDate),
+				SyncedPriority:    int(item.Priority),
+				SyncedCompleted:   item.Completed,
+				LastSyncHash:      item.ContentHash(),
+				HALastSeenHash:    item.ContentHash(),
+				LastSyncedAt:      now,
 			}
 			if err := b.store.UpsertItem(ctx, si); err != nil {
 				return fmt.Errorf("writing state for %q: %w", item.Title, err)

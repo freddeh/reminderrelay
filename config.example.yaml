@@ -16,9 +16,19 @@ poll_interval: 30s
 # Map each Apple Reminders list name to a Home Assistant todo entity ID.
 # The Reminders list name is case-sensitive and must match exactly.
 # Run `just sync-once` with --verbose to discover your HA entity IDs.
+#
+# A mapping can also carry an optional ha_calendar_entity to mirror that
+# list's due-dated items onto a Home Assistant calendar (real due-date UI,
+# and lets HA automations trigger off the calendar's event-start time —
+# something the todo domain itself can't do). See README.md's "Calendar
+# mirroring" section before enabling this: it needs a calendar entity with
+# full create/update/delete support (Local Calendar is the tested choice),
+# and it's a one-way mirror — edits made on the HA calendar aren't read back.
 list_mappings:
   "Shopping": "todo.shopping"
-  "Work":     "todo.work_tasks"
+  "Work":
+    ha_entity: "todo.work_tasks"
+    ha_calendar_entity: "calendar.work_due_dates"
   # "Personal": "todo.personal"
 
 # Optional: export traces, metrics, and logs to an OTLP-compatible collector

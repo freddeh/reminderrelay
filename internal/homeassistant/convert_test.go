@@ -157,7 +157,7 @@ func TestBuildAddItemData_FullFields(t *testing.T) {
 		DueDate:     &due,
 	}
 
-	data := buildAddItemData("todo.shopping", item)
+	data := buildAddItemData("todo.shopping", item, 0)
 
 	if data["entity_id"] != "todo.shopping" {
 		t.Errorf("entity_id = %v, want todo.shopping", data["entity_id"])
@@ -179,7 +179,7 @@ func TestBuildAddItemData_NoPriorityNoDescription(t *testing.T) {
 		Priority: model.PriorityNone,
 	}
 
-	data := buildAddItemData("todo.work", item)
+	data := buildAddItemData("todo.work", item, 0)
 
 	if _, ok := data["description"]; ok {
 		t.Errorf("description should be absent for no-priority empty description, got %v", data["description"])
@@ -195,11 +195,53 @@ func TestBuildAddItemData_PriorityOnlyNoDescription(t *testing.T) {
 		Priority: model.PriorityMedium,
 	}
 
-	data := buildAddItemData("todo.work", item)
+	data := buildAddItemData("todo.work", item, 0)
 
 	// "[Medium] " + "" = "[Medium] "
 	if data["description"] != "[Medium] " {
 		t.Errorf("description = %q, want %q", data["description"], "[Medium] ")
+	}
+}
+
+func TestBuildAddItemData_TimedDueDate_EntitySupportsDatetime(t *testing.T) {
+	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.UTC)
+	item := &model.Item{Title: "Timed task", DueDate: &due}
+
+	data := buildAddItemData("todo.shopping", item, featureSetDueDatetimeOnItem)
+
+	if _, ok := data["due_date"]; ok {
+		t.Errorf("due_date should be absent when due_datetime is sent, got %v", data["due_date"])
+	}
+	if data["due_datetime"] != "2026-05-01 14:30:00" {
+		t.Errorf("due_datetime = %v, want 2026-05-01 14:30:00", data["due_datetime"])
+	}
+}
+
+func TestBuildAddItemData_TimedDueDate_EntityLacksDatetimeSupport(t *testing.T) {
+	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.UTC)
+	item := &model.Item{Title: "Timed task", DueDate: &due}
+
+	data := buildAddItemData("todo.shopping", item, 0)
+
+	if _, ok := data["due_datetime"]; ok {
+		t.Errorf("due_datetime should be absent without entity support, got %v", data["due_datetime"])
+	}
+	if data["due_date"] != "2026-05-01" {
+		t.Errorf("due_date = %v, want 2026-05-01 (fallback to date-only)", data["due_date"])
+	}
+}
+
+func TestBuildAddItemData_MidnightDueDate_TreatedAsDateOnly(t *testing.T) {
+	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	item := &model.Item{Title: "Midnight task", DueDate: &due}
+
+	data := buildAddItemData("todo.shopping", item, featureSetDueDatetimeOnItem)
+
+	if _, ok := data["due_datetime"]; ok {
+		t.Errorf("an exact-midnight due date should be treated as date-only, got due_datetime=%v", data["due_datetime"])
+	}
+	if data["due_date"] != "2026-05-01" {
+		t.Errorf("due_date = %v, want 2026-05-01", data["due_date"])
 	}
 }
 
@@ -217,7 +259,7 @@ func TestBuildUpdateItemData_TitleChanged(t *testing.T) {
 		DueDate:     &due,
 	}
 
-	data := buildUpdateItemData("todo.shopping", "Old title", item)
+	data := buildUpdateItemData("todo.shopping", "Old title", "Old title", item, 0)
 
 	if data["entity_id"] != "todo.shopping" {
 		t.Errorf("entity_id = %v, want todo.shopping", data["entity_id"])
@@ -239,13 +281,28 @@ func TestBuildUpdateItemData_TitleChanged(t *testing.T) {
 	}
 }
 
+func TestBuildUpdateItemData_IdentifierIsUIDNotTitle(t *testing.T) {
+	item := &model.Item{Title: "Same title", Completed: false}
+
+	// identifier (what HA uses to find the item) is a UID, distinct from
+	// currentTitle (what "rename" is compared against).
+	data := buildUpdateItemData("todo.work", "ha-uid-42", "Same title", item, 0)
+
+	if data["item"] != "ha-uid-42" {
+		t.Errorf("item = %v, want ha-uid-42 (should target by UID)", data["item"])
+	}
+	if _, ok := data["rename"]; ok {
+		t.Error("rename should be absent when title unchanged, even though identifier differs from title")
+	}
+}
+
 func TestBuildUpdateItemData_TitleUnchanged(t *testing.T) {
 	item := &model.Item{
 		Title:     "Same title",
 		Completed: true,
 	}
 
-	data := buildUpdateItemData("todo.work", "Same title", item)
+	data := buildUpdateItemData("todo.work", "Same title", "Same title", item, 0)
 
 	if _, ok := data["rename"]; ok {
 		t.Error("rename should be absent when title unchanged")
@@ -325,7 +382,7 @@ func TestConversionRoundTrip(t *testing.T) {
 	}
 
 	// model.Item → addData
-	data := buildAddItemData("todo.events", original)
+	data := buildAddItemData("todo.events", original, 0)
 
 	// Simulate what HA would return via get_items
 	haItem := haTodoItem{

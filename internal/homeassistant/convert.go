@@ -130,15 +130,31 @@ func setDueFields(data map[string]interface{}, dueDate *time.Time, features int)
 		return
 	}
 	if hasTimeComponent(*dueDate) && features&featureSetDueDatetimeOnItem != 0 {
-		data["due_datetime"] = dueDate.Format(dateTimeLayout)
+		// due_datetime is a naive "YYYY-MM-DD HH:MM:SS" with no timezone,
+		// interpreted by HA in its own configured local timezone — so this
+		// must be the wall-clock time in *this machine's* local zone, not
+		// whatever zone dueDate happens to carry (see hasTimeComponent).
+		data["due_datetime"] = dueDate.Local().Format(dateTimeLayout)
 		return
 	}
 	data["due_date"] = formatDue(dueDate)
 }
 
 // hasTimeComponent reports whether t carries a non-midnight time-of-day.
+//
+// t must be evaluated in local time here, not whatever Location it happens
+// to carry: EventKit's bridge round-trips a date-only due date as the true
+// UTC instant of *local* midnight (via NSCalendar's dateFromComponents,
+// which uses the current/local calendar — see bridge_darwin.m), so a
+// genuinely date-only reminder often arrives with Location == UTC and a
+// non-zero UTC hour (e.g. 22:00 UTC for local midnight in UTC+2). Checking
+// t.Hour() directly against that UTC-located value would misidentify it as
+// carrying a time-of-day, and — via setDueFields above and
+// calendarEventPayload — send the wrong (or wrongly-shifted) due date/day
+// to HA.
 func hasTimeComponent(t time.Time) bool {
-	return t.Hour() != 0 || t.Minute() != 0 || t.Second() != 0
+	local := t.Local()
+	return local.Hour() != 0 || local.Minute() != 0 || local.Second() != 0
 }
 
 // buildRemoveItemData returns the service-call payload for todo.remove_item.
@@ -158,14 +174,23 @@ func buildGetItemsData(entityID string) map[string]interface{} {
 
 // parseDue parses an HA due-date string. It tries date-only format first
 // ("2006-01-02"), then falls back to RFC 3339.
+//
+// A date-only string is parsed as local midnight, not UTC midnight: EventKit
+// represents a date-only due date as the true UTC instant of local midnight
+// (see [hasTimeComponent]), so constructing the equivalent local-midnight
+// instant here is what makes a round trip through Reminders land back on the
+// same calendar day instead of the previous or next one depending on the
+// machine's UTC offset sign.
 func parseDue(s string) (time.Time, error) {
-	if t, err := time.Parse(dateLayout, s); err == nil {
+	if t, err := time.ParseInLocation(dateLayout, s, time.Local); err == nil {
 		return t, nil
 	}
 	return time.Parse(time.RFC3339, s)
 }
 
-// formatDue formats a time value as a date-only string for HA.
+// formatDue formats a time value as a date-only string for HA, using its
+// local calendar date — see [hasTimeComponent] for why the value's own
+// Location can't be trusted to already reflect that.
 func formatDue(t *time.Time) string {
-	return t.Format(dateLayout)
+	return t.Local().Format(dateLayout)
 }

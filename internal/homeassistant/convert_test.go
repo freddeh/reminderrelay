@@ -40,7 +40,9 @@ func TestHAItemToModelItem_FullFields(t *testing.T) {
 	if got.DueDate == nil {
 		t.Fatal("DueDate = nil, want 2026-03-15")
 	}
-	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	// A date-only due date is local midnight, not UTC midnight — see
+	// parseDue.
+	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.Local)
 	if !got.DueDate.Equal(want) {
 		t.Errorf("DueDate = %v, want %v", got.DueDate, want)
 	}
@@ -149,7 +151,7 @@ func TestHAItemToModelItem_EmptyDescription(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildAddItemData_FullFields(t *testing.T) {
-	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.Local) // date-only: local midnight
 	item := &model.Item{
 		Title:       "New task",
 		Description: "Some notes",
@@ -204,7 +206,7 @@ func TestBuildAddItemData_PriorityOnlyNoDescription(t *testing.T) {
 }
 
 func TestBuildAddItemData_TimedDueDate_EntitySupportsDatetime(t *testing.T) {
-	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.UTC)
+	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.Local) // user picked 14:30 local time
 	item := &model.Item{Title: "Timed task", DueDate: &due}
 
 	data := buildAddItemData("todo.shopping", item, featureSetDueDatetimeOnItem)
@@ -218,7 +220,7 @@ func TestBuildAddItemData_TimedDueDate_EntitySupportsDatetime(t *testing.T) {
 }
 
 func TestBuildAddItemData_TimedDueDate_EntityLacksDatetimeSupport(t *testing.T) {
-	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.UTC)
+	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.Local)
 	item := &model.Item{Title: "Timed task", DueDate: &due}
 
 	data := buildAddItemData("todo.shopping", item, 0)
@@ -232,7 +234,7 @@ func TestBuildAddItemData_TimedDueDate_EntityLacksDatetimeSupport(t *testing.T) 
 }
 
 func TestBuildAddItemData_MidnightDueDate_TreatedAsDateOnly(t *testing.T) {
-	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.Local)
 	item := &model.Item{Title: "Midnight task", DueDate: &due}
 
 	data := buildAddItemData("todo.shopping", item, featureSetDueDatetimeOnItem)
@@ -250,7 +252,7 @@ func TestBuildAddItemData_MidnightDueDate_TreatedAsDateOnly(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildUpdateItemData_TitleChanged(t *testing.T) {
-	due := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	due := time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local) // date-only: local midnight
 	item := &model.Item{
 		Title:       "Updated title",
 		Description: "Updated notes",
@@ -336,7 +338,8 @@ func TestParseDue_DateOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	// A date-only string is local midnight, not UTC midnight — see parseDue.
+	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.Local)
 	if !got.Equal(want) {
 		t.Errorf("parseDue = %v, want %v", got, want)
 	}
@@ -360,10 +363,101 @@ func TestParseDue_Invalid(t *testing.T) {
 }
 
 func TestFormatDue(t *testing.T) {
-	d := time.Date(2026, 12, 25, 10, 30, 0, 0, time.UTC)
+	d := time.Date(2026, 12, 25, 10, 30, 0, 0, time.Local)
 	got := formatDue(&d)
 	if got != "2026-12-25" {
 		t.Errorf("formatDue = %q, want %q", got, "2026-12-25")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Timezone regression coverage.
+//
+// A date-only due date round-trips through EventKit as the true UTC instant
+// of *local* midnight (confirmed via the go-eventkit bridge's use of
+// NSCalendar's dateFromComponents, which resolves date components in the
+// current/local calendar). Reading the calendar day directly off such a
+// value's own Location — instead of converting to local time first — shifts
+// the reported day by one in either direction depending on the machine's UTC
+// offset sign. These tests pin time.Local to specific, known offsets so the
+// regression is caught regardless of which timezone actually runs the suite.
+// ---------------------------------------------------------------------------
+
+// withLocalTimezone overrides time.Local for the duration of the test,
+// restoring the original value on cleanup.
+func withLocalTimezone(t *testing.T, name string) {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Skipf("timezone database entry %q unavailable: %v", name, err)
+	}
+	original := time.Local
+	time.Local = loc
+	t.Cleanup(func() { time.Local = original })
+}
+
+func TestFormatDue_RecoversLocalDay_PositiveUTCOffset(t *testing.T) {
+	withLocalTimezone(t, "Europe/Berlin") // UTC+1/+2 — reproduces the reported bug directly
+
+	localMidnight := time.Date(2026, 9, 29, 0, 0, 0, 0, time.Local)
+	// What the EventKit bridge actually hands back for this date-only due
+	// date: the same instant, expressed in UTC (e.g. 2026-09-28T22:00:00Z
+	// for 2026-09-29T00:00:00+02:00).
+	asUTC := localMidnight.UTC()
+
+	got := formatDue(&asUTC)
+	if got != "2026-09-29" {
+		t.Errorf("formatDue = %q, want %q (must recover the local calendar day, not the UTC one)", got, "2026-09-29")
+	}
+}
+
+func TestFormatDue_RecoversLocalDay_NegativeUTCOffset(t *testing.T) {
+	withLocalTimezone(t, "America/New_York") // UTC-4/-5 — the opposite direction
+
+	localMidnight := time.Date(2026, 9, 29, 0, 0, 0, 0, time.Local)
+	asUTC := localMidnight.UTC()
+
+	got := formatDue(&asUTC)
+	if got != "2026-09-29" {
+		t.Errorf("formatDue = %q, want %q", got, "2026-09-29")
+	}
+}
+
+func TestParseDue_DateOnly_ProducesLocalMidnight(t *testing.T) {
+	withLocalTimezone(t, "America/New_York")
+
+	got, err := parseDue("2026-09-29")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Year() != 2026 || got.Month() != time.September || got.Day() != 29 {
+		t.Errorf("parseDue = %v, want calendar day 2026-09-29 (not shifted by treating the string as UTC midnight)", got)
+	}
+	if got.Hour() != 0 || got.Minute() != 0 {
+		t.Errorf("parseDue = %v, want local midnight", got)
+	}
+	if _, offset := got.Zone(); offset == 0 {
+		t.Errorf("parseDue location = %v, want a real local offset, not UTC", got.Location())
+	}
+}
+
+func TestHasTimeComponent_LocalMidnightWithUTCLocation_IsFalse(t *testing.T) {
+	withLocalTimezone(t, "Europe/Berlin")
+
+	localMidnight := time.Date(2026, 9, 29, 0, 0, 0, 0, time.Local)
+	asUTC := localMidnight.UTC() // non-zero UTC hour, despite being local midnight
+
+	if hasTimeComponent(asUTC) {
+		t.Error("hasTimeComponent should be false for local midnight, even when Location is UTC and the UTC hour is non-zero")
+	}
+}
+
+func TestHasTimeComponent_RealLocalTime_IsTrue(t *testing.T) {
+	withLocalTimezone(t, "Europe/Berlin")
+
+	localAfternoon := time.Date(2026, 9, 29, 14, 30, 0, 0, time.Local)
+	if !hasTimeComponent(localAfternoon) {
+		t.Error("hasTimeComponent should be true for a genuine local time-of-day")
 	}
 }
 
@@ -372,7 +466,7 @@ func TestFormatDue(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConversionRoundTrip(t *testing.T) {
-	due := time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)
+	due := time.Date(2026, 7, 4, 0, 0, 0, 0, time.Local) // date-only: local midnight
 	original := &model.Item{
 		Title:       "Independence Day",
 		Description: "Fireworks shopping",

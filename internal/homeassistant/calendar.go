@@ -93,7 +93,12 @@ func (a *Adapter) ListCalendarEvents(ctx context.Context, entityID string) ([]mo
 }
 
 // parseCalendarEventTime converts HA's CalendarEventTime (exactly one of
-// Date or DateTime is set) into a *time.Time.
+// Date or DateTime is set) into a *time.Time. An all-day event's Date is
+// parsed as local midnight — see [hasTimeComponent] — so it lines up with
+// how a date-only due date is represented everywhere else (parseDue,
+// EventKit's own date-only reminders), rather than disagreeing with them by
+// the local UTC offset and making the 3-way due-date merge see a
+// calendar-only change that never actually happened.
 func parseCalendarEventTime(t haclient.CalendarEventTime) (*time.Time, error) {
 	if t.DateTime != "" {
 		parsed, err := time.Parse(time.RFC3339, t.DateTime)
@@ -103,7 +108,7 @@ func parseCalendarEventTime(t haclient.CalendarEventTime) (*time.Time, error) {
 		return &parsed, nil
 	}
 	if t.Date != "" {
-		parsed, err := time.Parse(dateLayout, t.Date)
+		parsed, err := time.ParseInLocation(dateLayout, t.Date, time.Local)
 		if err != nil {
 			return nil, err
 		}
@@ -239,9 +244,12 @@ func calendarEventPayload(item *model.Item) map[string]interface{} {
 		event["dtstart"] = due.Format(time.RFC3339)
 		event["dtend"] = due.Add(defaultCalendarEventDuration).Format(time.RFC3339)
 	} else {
-		event["dtstart"] = due.Format(dateLayout)
+		// Date-only: format in local time, not due's own Location — see
+		// hasTimeComponent for why the two can disagree.
+		localDue := due.Local()
+		event["dtstart"] = localDue.Format(dateLayout)
 		// RFC5545 all-day events have an exclusive end date.
-		event["dtend"] = due.AddDate(0, 0, 1).Format(dateLayout)
+		event["dtend"] = localDue.AddDate(0, 0, 1).Format(dateLayout)
 	}
 	return event
 }

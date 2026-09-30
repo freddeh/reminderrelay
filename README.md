@@ -187,6 +187,8 @@ This is **opt-in per list**. **The due date is bidirectional**: an edit made dir
 
 This bidirectionality assumes **the calendar entity is dedicated to ReminderRelay** — used for nothing else. ReminderRelay only ever acts on events it created itself, tracked by UID in its own state database; an event you add to that same calendar directly, for an unrelated appointment, is simply invisible to it — ignored, not adopted as a new reminder, since its UID doesn't match anything tracked. The dedication matters for a softer reason than correctness, though: if the calendar is genuinely used for nothing but mirrored reminders, there's nothing else on it to *accidentally* drag or delete. Reuse a general-purpose calendar you also put real appointments on, and that protection goes away — you could drag the wrong event without meaning to. Creating new items by adding events directly to the calendar isn't supported either way — see the last point in [What gets mirrored, and how](#what-gets-mirrored-and-how).
 
+**Recurrence is not synced, in any form, by design.** The mirrored calendar event's only job is to reflect *whatever due date currently exists* — recurring or not — so the `platform: calendar` automation trigger always has something current to fire on. It deliberately does not carry an `rrule` describing the repeat pattern. This was evaluated deliberately, not just deferred: HA's `todo` domain has no recurrence field on any backend (checked directly against HA core's `todo/services.yaml` and `todo/const.py`, including `local_todo` specifically — none of them expose one), and `calendar.create_event`'s REST service has no `rrule` field either — only the WebSocket `calendar/event/create`/`update` commands ReminderRelay itself uses support it, which rules out setting recurrence from an HA script or automation regardless. If you want a task that comes back periodically, see [`examples/recreate_recurring_todo_automation.yaml`](examples/recreate_recurring_todo_automation.yaml) — it recreates a fresh one-off item on a schedule rather than syncing a true repeating series.
+
 ### Enabling it
 
 Add `ha_calendar_entity` to a list mapping (the setup wizard offers this as a step after mapping the todo entity):
@@ -229,7 +231,7 @@ Reading events back (the input side of the 3-way due-date merge) uses the plain 
 
 ### HA-side examples
 
-The [`examples/`](examples/) directory has two Home Assistant automation/script YAML files that pair with calendar mirroring: a notification automation using the `calendar` domain's due-date-adjacent trigger (something the `todo` domain has no equivalent of), and a script for creating new to-do items with the same priority/due-date encoding ReminderRelay itself uses, so they sync cleanly.
+The [`examples/`](examples/) directory has three Home Assistant automation/script YAML files that pair with calendar mirroring: a notification automation using the `calendar` domain's due-date-adjacent trigger (something the `todo` domain has no equivalent of); a script for creating new to-do items with the same priority/due-date encoding ReminderRelay itself uses, so they sync cleanly; and a scheduled automation built on that script for tasks that come back periodically, since recurrence itself isn't synced (see above).
 
 ## Priority Encoding
 

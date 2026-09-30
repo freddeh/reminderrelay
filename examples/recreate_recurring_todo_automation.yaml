@@ -1,0 +1,62 @@
+# ReminderRelay example: get a task that comes back on a schedule.
+#
+# Neither Home Assistant's todo domain nor ReminderRelay's calendar mirror
+# represent a recurrence *pattern* — the todo entity has no field for one at
+# all (checked directly against HA core's todo/services.yaml and
+# todo/const.py — no backend exposes one), and the calendar mirror
+# deliberately only ever reflects "when is this item currently due," not a
+# repeating series (see README.md's "Calendar Mirroring" section for why).
+#
+# So instead of one item that repeats, this recreates a fresh one-off item
+# on a schedule. Each occurrence is independent: completing (or missing) one
+# has no effect on the next, and there's no link between them the way a
+# native recurrence rule would have. That's a real, meaningful difference
+# from how recurrence works in the Reminders app itself — accept the
+# trade-off consciously rather than expecting series-like behaviour.
+#
+# Requires examples/add_todo_item_script.yaml to already be installed as a
+# script. Replace `script.reminderrelay_add_to_do_item` below with whatever
+# entity_id your instance actually assigned it (Settings → Automations &
+# Scenes → Scripts — hover the script to see its entity_id), and adjust the
+# trigger/condition and the `data` fields for your own task and cadence.
+#
+# Install: Settings → Automations & Scenes → Automations → ⋮ → Edit in YAML,
+# paste this in (or add it as its own entry in automations.yaml).
+
+alias: "ReminderRelay: recreate recurring to-do (weekly example)"
+description: >-
+  Creates a fresh to-do item every Monday morning. Copy this automation once
+  per recurring task, or template the `data` fields from an input_text/
+  input_select helper if you want one automation covering several tasks.
+triggers:
+  - trigger: time
+    at: "08:00:00"
+conditions:
+  - condition: time
+    weekday:
+      - mon
+actions:
+  - action: script.reminderrelay_add_to_do_item # ← replace with your script's actual entity_id
+    data:
+      todo_entity: todo.chores # ← replace with your target list
+      title: "Take out recycling"
+      priority: "none"
+      due_date: "{{ now().date().isoformat() }}" # due the same day it's created
+mode: single
+
+# --- Other cadences ---------------------------------------------------------
+#
+# Daily:
+#   triggers:
+#     - trigger: time
+#       at: "08:00:00"
+#   (drop the weekday condition entirely)
+#
+# Monthly (1st of the month):
+#   conditions:
+#     - condition: template
+#       value_template: "{{ now().day == 1 }}"
+#
+# Every N weeks: track the last-run date in an input_datetime helper, update
+# it from this automation's own actions, and add a template condition
+# comparing now() against it — HA has no built-in "every N weeks" trigger.

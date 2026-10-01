@@ -69,7 +69,10 @@ func TestEngine_DebounceReconcile_SeparateEntitiesDoNotCoalesce(t *testing.T) {
 	ha.addItems("todo.groceries", model.Item{UID: "ha-2", Title: "Buy bread", ModifiedAt: now})
 	store := newMockStore()
 
-	mappings := map[string]string{"Shopping": "todo.shopping", "Groceries": "todo.groceries"}
+	mappings := map[string]model.ListMapping{
+		"Shopping":  {HAEntity: "todo.shopping"},
+		"Groceries": {HAEntity: "todo.groceries"},
+	}
 	r := NewReconciler(rem, ha, store, testLogger)
 	e := NewEngine(r, nil, mappings, time.Hour, testLogger)
 	e.debounceWindow = 20 * time.Millisecond

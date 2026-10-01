@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/njoerd114/reminderrelay/internal/state"
 )
 
 //go:embed plist.tmpl
@@ -177,6 +179,24 @@ func RemoveBinary() error {
 func IsDaemonLoaded() bool {
 	cmd := exec.Command("launchctl", "list", PlistLabel)
 	return cmd.Run() == nil
+}
+
+// ResetStateDB removes the sync state database at its default location,
+// along with its WAL/SHM sidecar files (the store opens in WAL mode, which
+// keeps recent writes there until checkpointed — leaving them behind would
+// let stale data resurface). Returns nil if no database exists. Used by the
+// setup wizard to let the user start sync history over from scratch.
+func ResetStateDB() error {
+	dbPath, err := state.DefaultDBPath()
+	if err != nil {
+		return fmt.Errorf("resolving state DB path: %w", err)
+	}
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // PurgeUserData removes config, state database, and log files.

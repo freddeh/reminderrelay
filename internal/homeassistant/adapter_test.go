@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	haclient "github.com/mkelcik/go-ha-client/v2"
 
@@ -91,6 +92,18 @@ func (f *fakeRESTClient) CallServiceWithResponse(_ context.Context, _, service s
 	return haclient.ServiceCallResponse{
 		ServiceResponse: map[string]json.RawMessage{entityID: raw},
 	}, nil
+}
+
+// GetStateAttributes always reports no supported_features (feature detection
+// isn't what these tests exercise), so due dates fall back to date-only.
+func (f *fakeRESTClient) GetStateAttributes(_ context.Context, _ string) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
+// GetCalendarEvents is unused by these tests (they exercise the todo-item
+// path, not calendar mirroring) but is required to satisfy RESTClient.
+func (f *fakeRESTClient) GetCalendarEvents(_ context.Context, _ string, _, _ time.Time) (haclient.CalendarEvents, error) {
+	return nil, nil
 }
 
 func (f *fakeRESTClient) seedItems(entityID string, items ...haTodoItem) {

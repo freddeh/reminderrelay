@@ -62,7 +62,7 @@ func TestReconciler_RunAndReconcileEntity_AreMutuallyExclusive(t *testing.T) {
 	reconcileDone := make(chan struct{})
 	go func() {
 		defer close(reconcileDone)
-		_, _ = r.ReconcileEntity(context.Background(), "Shopping", "todo.shopping")
+		_, _ = r.ReconcileEntity(context.Background(), "Shopping", testMappings["Shopping"])
 	}()
 
 	select {

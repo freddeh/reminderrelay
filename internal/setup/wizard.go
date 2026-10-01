@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/njoerd114/reminderrelay/internal/config"
+	"github.com/njoerd114/reminderrelay/internal/model"
+	"github.com/njoerd114/reminderrelay/internal/state"
 )
 
 // Wizard guides the user through first-run configuration and installation.
@@ -32,6 +34,10 @@ func NewWizard(r io.Reader, w io.Writer, logger *slog.Logger) *Wizard {
 func (wiz *Wizard) Run(ctx context.Context) error {
 	_, _ = fmt.Fprintf(wiz.w, "\nWelcome to ReminderRelay Setup!\n")
 	_, _ = fmt.Fprintf(wiz.w, "This wizard will help you configure and install ReminderRelay.\n\n")
+
+	if err := wiz.offerStateDBReset(); err != nil {
+		return err
+	}
 
 	// Check for existing config.
 	cfgPath, err := config.DefaultPath()
@@ -98,9 +104,39 @@ func (wiz *Wizard) Run(ctx context.Context) error {
 	return wiz.offerDaemonInstall(ctx)
 }
 
+// offerStateDBReset asks whether to drop the existing sync state database,
+// if one exists. Resetting forgets all tracked links between Reminders and
+// HA items — the next reconcile pass re-runs first-run bootstrap
+// title-matching from scratch (see [Bootstrap.Run]) instead of resuming
+// from wherever the previous install left off. This is independent of
+// whether the config file itself is kept or overwritten, so it's asked
+// before that fork, right at the start of the wizard.
+func (wiz *Wizard) offerStateDBReset() error {
+	dbPath, err := state.DefaultDBPath()
+	if err != nil {
+		return fmt.Errorf("resolving state DB path: %w", err)
+	}
+
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		return nil // no existing database — nothing to offer
+	}
+
+	_, _ = fmt.Fprintf(wiz.w, "  Existing sync state database found at %s\n", dbPath)
+	if !wiz.prompt.Confirm("Reset it? This forgets all sync history — the next sync re-matches everything from scratch.", false) {
+		_, _ = fmt.Fprintf(wiz.w, "\n")
+		return nil
+	}
+
+	if err := ResetStateDB(); err != nil {
+		return fmt.Errorf("resetting state DB: %w", err)
+	}
+	_, _ = fmt.Fprintf(wiz.w, "  ✓ State database reset\n\n")
+	return nil
+}
+
 // buildListMappings discovers Reminders lists and HA entities, then lets the
 // user pair them interactively.
-func (wiz *Wizard) buildListMappings(ctx context.Context, haURL, haToken string) (map[string]string, error) {
+func (wiz *Wizard) buildListMappings(ctx context.Context, haURL, haToken string) (map[string]model.ListMapping, error) {
 	// Discover Reminders lists.
 	_, _ = fmt.Fprintf(wiz.w, "  Discovering Reminders lists (may trigger permissions prompt)...\n")
 	remLists, remErr := DiscoverRemindersLists(wiz.logger)
@@ -129,10 +165,20 @@ func (wiz *Wizard) buildListMappings(ctx context.Context, haURL, haToken string)
 	}
 	_, _ = fmt.Fprintf(wiz.w, "\n")
 
+	// Discover HA calendar entities, for optional due-date mirroring.
+	calEntities, calErr := DiscoverHACalendarEntities(ctx, haURL, haToken)
+	if calErr != nil {
+		wiz.logger.Warn("could not discover HA calendar entities", "error", calErr)
+	}
+	calEntityNames := make([]string, len(calEntities))
+	for i, e := range calEntities {
+		calEntityNames[i] = e.String()
+	}
+
 	// Interactive mapping.
 	_, _ = fmt.Fprintf(wiz.w, "  Map Reminders lists to HA entities (empty Reminders name to finish):\n\n")
 
-	mappings := make(map[string]string)
+	mappings := make(map[string]model.ListMapping)
 	haEntityNames := make([]string, len(haEntities))
 	for i, e := range haEntities {
 		haEntityNames[i] = e.String()
@@ -177,8 +223,28 @@ func (wiz *Wizard) buildListMappings(ctx context.Context, haURL, haToken string)
 			}
 		}
 
-		mappings[remName] = entityID
-		_, _ = fmt.Fprintf(wiz.w, "  ✓ Mapped %q → %s\n\n", remName, entityID)
+		mapping := model.ListMapping{HAEntity: entityID}
+
+		if len(calEntities) > 0 && wiz.prompt.Confirm(fmt.Sprintf("Also mirror due dates for %q to a Home Assistant calendar?", remName), false) {
+			idx, err := wiz.prompt.Select("HA calendar entity", calEntityNames)
+			if err != nil {
+				return nil, fmt.Errorf("selecting HA calendar entity: %w", err)
+			}
+			mapping.HACalendarEntity = calEntities[idx].EntityID
+			_, _ = fmt.Fprintf(wiz.w, "  ⚠ Calendar mirroring needs create+update+delete support (e.g. a Local Calendar entity).\n")
+			_, _ = fmt.Fprintf(wiz.w, "    ReminderRelay checks this at sync time and disables mirroring for %q if unsupported.\n", remName)
+			_, _ = fmt.Fprintf(wiz.w, "    The due date is bidirectional: dragging or deleting the mirrored event on the HA\n")
+			_, _ = fmt.Fprintf(wiz.w, "    calendar changes the due date in Reminders too. Use a calendar dedicated to\n")
+			_, _ = fmt.Fprintf(wiz.w, "    ReminderRelay for %q — other events on it are ignored, but a shared calendar\n", remName)
+			_, _ = fmt.Fprintf(wiz.w, "    invites accidental edits. Title and notes stay one-way (Reminders/HA → calendar only).\n")
+		}
+
+		mappings[remName] = mapping
+		if mapping.HACalendarEntity != "" {
+			_, _ = fmt.Fprintf(wiz.w, "  ✓ Mapped %q → %s (calendar: %s)\n\n", remName, entityID, mapping.HACalendarEntity)
+		} else {
+			_, _ = fmt.Fprintf(wiz.w, "  ✓ Mapped %q → %s\n\n", remName, entityID)
+		}
 	}
 
 	if len(mappings) == 0 {

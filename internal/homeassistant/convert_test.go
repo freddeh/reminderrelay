@@ -40,7 +40,9 @@ func TestHAItemToModelItem_FullFields(t *testing.T) {
 	if got.DueDate == nil {
 		t.Fatal("DueDate = nil, want 2026-03-15")
 	}
-	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	// A date-only due date is local midnight, not UTC midnight — see
+	// parseDue.
+	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.Local)
 	if !got.DueDate.Equal(want) {
 		t.Errorf("DueDate = %v, want %v", got.DueDate, want)
 	}
@@ -149,7 +151,7 @@ func TestHAItemToModelItem_EmptyDescription(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildAddItemData_FullFields(t *testing.T) {
-	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.Local) // date-only: local midnight
 	item := &model.Item{
 		Title:       "New task",
 		Description: "Some notes",
@@ -157,7 +159,7 @@ func TestBuildAddItemData_FullFields(t *testing.T) {
 		DueDate:     &due,
 	}
 
-	data := buildAddItemData("todo.shopping", item)
+	data := buildAddItemData("todo.shopping", item, 0)
 
 	if data["entity_id"] != "todo.shopping" {
 		t.Errorf("entity_id = %v, want todo.shopping", data["entity_id"])
@@ -179,7 +181,7 @@ func TestBuildAddItemData_NoPriorityNoDescription(t *testing.T) {
 		Priority: model.PriorityNone,
 	}
 
-	data := buildAddItemData("todo.work", item)
+	data := buildAddItemData("todo.work", item, 0)
 
 	if _, ok := data["description"]; ok {
 		t.Errorf("description should be absent for no-priority empty description, got %v", data["description"])
@@ -195,11 +197,53 @@ func TestBuildAddItemData_PriorityOnlyNoDescription(t *testing.T) {
 		Priority: model.PriorityMedium,
 	}
 
-	data := buildAddItemData("todo.work", item)
+	data := buildAddItemData("todo.work", item, 0)
 
 	// "[Medium] " + "" = "[Medium] "
 	if data["description"] != "[Medium] " {
 		t.Errorf("description = %q, want %q", data["description"], "[Medium] ")
+	}
+}
+
+func TestBuildAddItemData_TimedDueDate_EntitySupportsDatetime(t *testing.T) {
+	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.Local) // user picked 14:30 local time
+	item := &model.Item{Title: "Timed task", DueDate: &due}
+
+	data := buildAddItemData("todo.shopping", item, featureSetDueDatetimeOnItem)
+
+	if _, ok := data["due_date"]; ok {
+		t.Errorf("due_date should be absent when due_datetime is sent, got %v", data["due_date"])
+	}
+	if data["due_datetime"] != "2026-05-01 14:30:00" {
+		t.Errorf("due_datetime = %v, want 2026-05-01 14:30:00", data["due_datetime"])
+	}
+}
+
+func TestBuildAddItemData_TimedDueDate_EntityLacksDatetimeSupport(t *testing.T) {
+	due := time.Date(2026, 5, 1, 14, 30, 0, 0, time.Local)
+	item := &model.Item{Title: "Timed task", DueDate: &due}
+
+	data := buildAddItemData("todo.shopping", item, 0)
+
+	if _, ok := data["due_datetime"]; ok {
+		t.Errorf("due_datetime should be absent without entity support, got %v", data["due_datetime"])
+	}
+	if data["due_date"] != "2026-05-01" {
+		t.Errorf("due_date = %v, want 2026-05-01 (fallback to date-only)", data["due_date"])
+	}
+}
+
+func TestBuildAddItemData_MidnightDueDate_TreatedAsDateOnly(t *testing.T) {
+	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.Local)
+	item := &model.Item{Title: "Midnight task", DueDate: &due}
+
+	data := buildAddItemData("todo.shopping", item, featureSetDueDatetimeOnItem)
+
+	if _, ok := data["due_datetime"]; ok {
+		t.Errorf("an exact-midnight due date should be treated as date-only, got due_datetime=%v", data["due_datetime"])
+	}
+	if data["due_date"] != "2026-05-01" {
+		t.Errorf("due_date = %v, want 2026-05-01", data["due_date"])
 	}
 }
 
@@ -208,7 +252,7 @@ func TestBuildAddItemData_PriorityOnlyNoDescription(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildUpdateItemData_TitleChanged(t *testing.T) {
-	due := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	due := time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local) // date-only: local midnight
 	item := &model.Item{
 		Title:       "Updated title",
 		Description: "Updated notes",
@@ -217,7 +261,7 @@ func TestBuildUpdateItemData_TitleChanged(t *testing.T) {
 		DueDate:     &due,
 	}
 
-	data := buildUpdateItemData("todo.shopping", "Old title", item)
+	data := buildUpdateItemData("todo.shopping", "Old title", "Old title", item, 0)
 
 	if data["entity_id"] != "todo.shopping" {
 		t.Errorf("entity_id = %v, want todo.shopping", data["entity_id"])
@@ -239,13 +283,28 @@ func TestBuildUpdateItemData_TitleChanged(t *testing.T) {
 	}
 }
 
+func TestBuildUpdateItemData_IdentifierIsUIDNotTitle(t *testing.T) {
+	item := &model.Item{Title: "Same title", Completed: false}
+
+	// identifier (what HA uses to find the item) is a UID, distinct from
+	// currentTitle (what "rename" is compared against).
+	data := buildUpdateItemData("todo.work", "ha-uid-42", "Same title", item, 0)
+
+	if data["item"] != "ha-uid-42" {
+		t.Errorf("item = %v, want ha-uid-42 (should target by UID)", data["item"])
+	}
+	if _, ok := data["rename"]; ok {
+		t.Error("rename should be absent when title unchanged, even though identifier differs from title")
+	}
+}
+
 func TestBuildUpdateItemData_TitleUnchanged(t *testing.T) {
 	item := &model.Item{
 		Title:     "Same title",
 		Completed: true,
 	}
 
-	data := buildUpdateItemData("todo.work", "Same title", item)
+	data := buildUpdateItemData("todo.work", "Same title", "Same title", item, 0)
 
 	if _, ok := data["rename"]; ok {
 		t.Error("rename should be absent when title unchanged")
@@ -279,7 +338,8 @@ func TestParseDue_DateOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+	// A date-only string is local midnight, not UTC midnight — see parseDue.
+	want := time.Date(2026, 3, 15, 0, 0, 0, 0, time.Local)
 	if !got.Equal(want) {
 		t.Errorf("parseDue = %v, want %v", got, want)
 	}
@@ -303,10 +363,101 @@ func TestParseDue_Invalid(t *testing.T) {
 }
 
 func TestFormatDue(t *testing.T) {
-	d := time.Date(2026, 12, 25, 10, 30, 0, 0, time.UTC)
+	d := time.Date(2026, 12, 25, 10, 30, 0, 0, time.Local)
 	got := formatDue(&d)
 	if got != "2026-12-25" {
 		t.Errorf("formatDue = %q, want %q", got, "2026-12-25")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Timezone regression coverage.
+//
+// A date-only due date round-trips through EventKit as the true UTC instant
+// of *local* midnight (confirmed via the go-eventkit bridge's use of
+// NSCalendar's dateFromComponents, which resolves date components in the
+// current/local calendar). Reading the calendar day directly off such a
+// value's own Location — instead of converting to local time first — shifts
+// the reported day by one in either direction depending on the machine's UTC
+// offset sign. These tests pin time.Local to specific, known offsets so the
+// regression is caught regardless of which timezone actually runs the suite.
+// ---------------------------------------------------------------------------
+
+// withLocalTimezone overrides time.Local for the duration of the test,
+// restoring the original value on cleanup.
+func withLocalTimezone(t *testing.T, name string) {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Skipf("timezone database entry %q unavailable: %v", name, err)
+	}
+	original := time.Local
+	time.Local = loc
+	t.Cleanup(func() { time.Local = original })
+}
+
+func TestFormatDue_RecoversLocalDay_PositiveUTCOffset(t *testing.T) {
+	withLocalTimezone(t, "Europe/Berlin") // UTC+1/+2 — reproduces the reported bug directly
+
+	localMidnight := time.Date(2026, 9, 29, 0, 0, 0, 0, time.Local)
+	// What the EventKit bridge actually hands back for this date-only due
+	// date: the same instant, expressed in UTC (e.g. 2026-09-28T22:00:00Z
+	// for 2026-09-29T00:00:00+02:00).
+	asUTC := localMidnight.UTC()
+
+	got := formatDue(&asUTC)
+	if got != "2026-09-29" {
+		t.Errorf("formatDue = %q, want %q (must recover the local calendar day, not the UTC one)", got, "2026-09-29")
+	}
+}
+
+func TestFormatDue_RecoversLocalDay_NegativeUTCOffset(t *testing.T) {
+	withLocalTimezone(t, "America/New_York") // UTC-4/-5 — the opposite direction
+
+	localMidnight := time.Date(2026, 9, 29, 0, 0, 0, 0, time.Local)
+	asUTC := localMidnight.UTC()
+
+	got := formatDue(&asUTC)
+	if got != "2026-09-29" {
+		t.Errorf("formatDue = %q, want %q", got, "2026-09-29")
+	}
+}
+
+func TestParseDue_DateOnly_ProducesLocalMidnight(t *testing.T) {
+	withLocalTimezone(t, "America/New_York")
+
+	got, err := parseDue("2026-09-29")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Year() != 2026 || got.Month() != time.September || got.Day() != 29 {
+		t.Errorf("parseDue = %v, want calendar day 2026-09-29 (not shifted by treating the string as UTC midnight)", got)
+	}
+	if got.Hour() != 0 || got.Minute() != 0 {
+		t.Errorf("parseDue = %v, want local midnight", got)
+	}
+	if _, offset := got.Zone(); offset == 0 {
+		t.Errorf("parseDue location = %v, want a real local offset, not UTC", got.Location())
+	}
+}
+
+func TestHasTimeComponent_LocalMidnightWithUTCLocation_IsFalse(t *testing.T) {
+	withLocalTimezone(t, "Europe/Berlin")
+
+	localMidnight := time.Date(2026, 9, 29, 0, 0, 0, 0, time.Local)
+	asUTC := localMidnight.UTC() // non-zero UTC hour, despite being local midnight
+
+	if hasTimeComponent(asUTC) {
+		t.Error("hasTimeComponent should be false for local midnight, even when Location is UTC and the UTC hour is non-zero")
+	}
+}
+
+func TestHasTimeComponent_RealLocalTime_IsTrue(t *testing.T) {
+	withLocalTimezone(t, "Europe/Berlin")
+
+	localAfternoon := time.Date(2026, 9, 29, 14, 30, 0, 0, time.Local)
+	if !hasTimeComponent(localAfternoon) {
+		t.Error("hasTimeComponent should be true for a genuine local time-of-day")
 	}
 }
 
@@ -315,7 +466,7 @@ func TestFormatDue(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConversionRoundTrip(t *testing.T) {
-	due := time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)
+	due := time.Date(2026, 7, 4, 0, 0, 0, 0, time.Local) // date-only: local midnight
 	original := &model.Item{
 		Title:       "Independence Day",
 		Description: "Fireworks shopping",
@@ -325,7 +476,7 @@ func TestConversionRoundTrip(t *testing.T) {
 	}
 
 	// model.Item → addData
-	data := buildAddItemData("todo.events", original)
+	data := buildAddItemData("todo.events", original, 0)
 
 	// Simulate what HA would return via get_items
 	haItem := haTodoItem{

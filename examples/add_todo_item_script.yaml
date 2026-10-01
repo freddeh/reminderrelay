@@ -1,0 +1,127 @@
+# ReminderRelay example: create a to-do item the way ReminderRelay itself
+# would, so it round-trips cleanly on the next sync pass.
+#
+# This script only calls `todo.add_item` — it deliberately does NOT create a
+# calendar event itself. If the target list has calendar mirroring enabled,
+# ReminderRelay's own reconcile pass creates that mirrored event
+# automatically once it picks up this new item; creating one here too would
+# just race with that and produce a duplicate. "Fully compatible" here means
+# the fields going into `todo.add_item` are encoded exactly the way
+# ReminderRelay's own adapter encodes them — see internal/model/item.go
+# (priority prefix) and internal/homeassistant/convert.go (due_date vs
+# due_datetime) — so the item decodes correctly into Apple Reminders instead
+# of showing up with a literal "[High]" in its notes or a silently
+# truncated due time.
+#
+# Install: Settings → Automations & Scenes → Scripts → ⋮ → Edit in YAML,
+# paste this in (or add it as its own entry in scripts.yaml). Then call it
+# from a dashboard button, another automation, or the Actions dev tool.
+
+alias: "ReminderRelay: add to-do item"
+description: >-
+  Creates a to-do item with ReminderRelay-compatible priority encoding and
+  due-date handling. Leave due_date and due_datetime both empty for no due
+  date; set at most one of them.
+fields:
+  todo_entity:
+    name: To-do list
+    description: The HA todo entity mapped to a Reminders list in ReminderRelay's config.
+    required: true
+    selector:
+      entity:
+        domain: todo
+  title:
+    name: Title
+    required: true
+    selector:
+      text:
+  notes:
+    name: Notes
+    description: >-
+      Plain text. Rendered as markdown in the HA frontend, shown as plain
+      text in Reminders (EventKit has no rich-text support) — the same
+      notes can look different in each app if they contain markdown syntax.
+      That's expected, not a bug.
+    required: false
+    default: ""
+    selector:
+      text:
+        multiline: true
+  priority:
+    name: Priority
+    required: false
+    default: "none"
+    selector:
+      select:
+        options:
+          - "none"
+          - "low"
+          - "medium"
+          - "high"
+  due_date:
+    name: Due date (no specific time)
+    description: >-
+      Use this OR due_datetime, not both. ReminderRelay treats a due time of
+      exactly midnight the same as "no time set" (it can't otherwise tell
+      the two apart), so a date-only due date belongs here, not in
+      due_datetime at 00:00.
+    required: false
+    selector:
+      date:
+  due_datetime:
+    name: Due date & time
+    description: >-
+      Use this OR due_date, not both. Only takes effect if todo_entity
+      declares SET_DUE_DATETIME_ON_ITEM support (checked automatically
+      below) — falls back to a date-only due date otherwise, the same way
+      ReminderRelay's own sync does.
+    required: false
+    selector:
+      datetime:
+sequence:
+  - variables:
+      priority_prefix: "{{ {'high': '[High] ', 'medium': '[Medium] ', 'low': '[Low] '}.get(priority, '') }}"
+      full_description: "{{ priority_prefix }}{{ notes | default('', true) }}"
+      # Bit 32 = todo.TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM.
+      supports_due_datetime: "{{ (state_attr(todo_entity, 'supported_features') | int(0)) | bitwise_and(32) > 0 }}"
+  - choose:
+      # A specific due time was given, and the entity can actually store one.
+      - conditions: "{{ due_datetime is defined and due_datetime not in [none, ''] and supports_due_datetime }}"
+        sequence:
+          - action: todo.add_item
+            target:
+              entity_id: "{{ todo_entity }}"
+            data:
+              item: "{{ title }}"
+              description: "{{ full_description }}"
+              due_datetime: "{{ due_datetime }}"
+      # A specific due time was given, but the entity can't store one —
+      # fall back to date-only, matching ReminderRelay's own fallback.
+      - conditions: "{{ due_datetime is defined and due_datetime not in [none, ''] and not supports_due_datetime }}"
+        sequence:
+          - action: todo.add_item
+            target:
+              entity_id: "{{ todo_entity }}"
+            data:
+              item: "{{ title }}"
+              description: "{{ full_description }}"
+              due_date: "{{ due_datetime.split(' ')[0] }}"
+      # Date-only due date.
+      - conditions: "{{ due_date is defined and due_date not in [none, ''] }}"
+        sequence:
+          - action: todo.add_item
+            target:
+              entity_id: "{{ todo_entity }}"
+            data:
+              item: "{{ title }}"
+              description: "{{ full_description }}"
+              due_date: "{{ due_date }}"
+    default:
+      # No due date at all.
+      - action: todo.add_item
+        target:
+          entity_id: "{{ todo_entity }}"
+        data:
+          item: "{{ title }}"
+          description: "{{ full_description }}"
+mode: single

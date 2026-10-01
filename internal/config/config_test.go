@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/njoerd114/reminderrelay/internal/model"
 )
 
 func writeConfig(t *testing.T, content string) string {
@@ -46,6 +48,61 @@ list_mappings:
 	}
 	if len(cfg.ListMappings) != 2 {
 		t.Errorf("ListMappings len = %d, want 2", len(cfg.ListMappings))
+	}
+}
+
+func TestLoad_ListMappingLongForm(t *testing.T) {
+	path := writeConfig(t, `
+ha_url: "http://homeassistant.local:8123"
+ha_token: "abc123"
+list_mappings:
+  Shopping: todo.shopping
+  Work:
+    ha_entity: todo.work_tasks
+    ha_calendar_entity: calendar.work_due_dates
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	shopping := cfg.ListMappings["Shopping"]
+	if shopping.HAEntity != "todo.shopping" || shopping.HACalendarEntity != "" {
+		t.Errorf("Shopping mapping = %+v, want {todo.shopping, \"\"}", shopping)
+	}
+
+	work := cfg.ListMappings["Work"]
+	if work.HAEntity != "todo.work_tasks" || work.HACalendarEntity != "calendar.work_due_dates" {
+		t.Errorf("Work mapping = %+v, want {todo.work_tasks, calendar.work_due_dates}", work)
+	}
+}
+
+func TestWrite_RoundTripsListMappings(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+
+	original := &Config{
+		HAURL:   "http://homeassistant.local:8123",
+		HAToken: "abc123",
+		ListMappings: map[string]model.ListMapping{
+			"Shopping": {HAEntity: "todo.shopping"},
+			"Work":     {HAEntity: "todo.work_tasks", HACalendarEntity: "calendar.work_due_dates"},
+		},
+	}
+	if err := original.Write(path); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load after Write: %v", err)
+	}
+
+	if got := reloaded.ListMappings["Shopping"]; got != original.ListMappings["Shopping"] {
+		t.Errorf("Shopping mapping = %+v, want %+v", got, original.ListMappings["Shopping"])
+	}
+	if got := reloaded.ListMappings["Work"]; got != original.ListMappings["Work"] {
+		t.Errorf("Work mapping = %+v, want %+v", got, original.ListMappings["Work"])
 	}
 }
 

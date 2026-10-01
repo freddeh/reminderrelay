@@ -30,9 +30,43 @@ type RemindersSource interface {
 // Implemented by [homeassistant.Adapter].
 type HASource interface {
 	GetItems(ctx context.Context, entityID string) ([]model.Item, error)
+	// AddItem returns the newly created item's HA UID, diffed from
+	// todo.get_items before/after the add rather than re-fetched and matched
+	// by title afterwards — title-based matching could pick the wrong item
+	// when titles collide, or silently link to an unrelated one.
 	AddItem(ctx context.Context, entityID string, item *model.Item) (uid string, err error)
-	UpdateItem(ctx context.Context, entityID, currentTitle string, item *model.Item) error
-	RemoveItem(ctx context.Context, entityID, title string) error
+	// UpdateItem and RemoveItem target the item by haUID when known (falling
+	// back to currentTitle/title internally if the HA version doesn't
+	// resolve UIDs); haUID may be empty for items not yet tracked with one.
+	UpdateItem(ctx context.Context, entityID, haUID, currentTitle string, item *model.Item) error
+	RemoveItem(ctx context.Context, entityID, haUID, title string) error
+}
+
+// CalendarSource provides mirroring of due-dated items onto a Home Assistant
+// calendar entity, giving them a real due-date UI and letting HA automations
+// trigger off the calendar's event-start/end triggers — neither of which the
+// todo domain supports. Only the due date is genuinely bidirectional: an
+// edit made directly on the HA calendar (dragging an event, deleting it)
+// flows back into Reminders and HA-todo via the 3-way merge in
+// [Reconciler.mergeAndSync]. Title, notes, priority, and completed status
+// still flow one-way into the mirrored event, never back — see README.md's
+// "Calendar Mirroring" section for the reasoning. Implemented by
+// [homeassistant.Adapter].
+type CalendarSource interface {
+	// CalendarSupportsMutation reports whether entityID can be mirrored to:
+	// it must support creating, updating, and deleting events under program
+	// control (HA core 2026.x's local_calendar does; other calendar
+	// backends may not — see README.md).
+	CalendarSupportsMutation(ctx context.Context, entityID string) (bool, error)
+	// ListCalendarEvents returns every event currently on entityID (within
+	// an adapter-defined lookback/lookahead window), used to detect
+	// calendar-side due-date edits. An event with no corresponding state row
+	// (one the user created directly on the calendar) is ignored — see
+	// README.md for why creating new items this way isn't supported.
+	ListCalendarEvents(ctx context.Context, entityID string) ([]model.CalendarEvent, error)
+	CreateCalendarEvent(ctx context.Context, entityID string, item *model.Item) (uid string, err error)
+	UpdateCalendarEvent(ctx context.Context, entityID, uid string, item *model.Item) error
+	DeleteCalendarEvent(ctx context.Context, entityID, uid string) error
 }
 
 // StateStore provides access to the sync state database.

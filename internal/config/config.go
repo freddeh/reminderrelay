@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/njoerd114/reminderrelay/internal/model"
 )
 
 // Config holds the full application configuration loaded from YAML.
@@ -23,9 +25,13 @@ type Config struct {
 	// Minimum 10s, maximum 5m. Defaults to 30s if unset.
 	PollInterval time.Duration `yaml:"poll_interval"`
 
-	// ListMappings maps Apple Reminders list names to Home Assistant todo entity IDs.
-	// Example: {"Shopping": "todo.shopping", "Work": "todo.work_tasks"}
-	ListMappings map[string]string `yaml:"list_mappings"`
+	// ListMappings maps Apple Reminders list names to Home Assistant todo
+	// (and optionally calendar) entities. Example:
+	//   Shopping: todo.shopping
+	//   Work:
+	//     ha_entity: todo.work_tasks
+	//     ha_calendar_entity: calendar.work_due_dates
+	ListMappings map[string]model.ListMapping `yaml:"list_mappings"`
 
 	// Telemetry configures optional OpenTelemetry export via OTLP gRPC.
 	// Omit the block entirely to disable telemetry.
@@ -108,11 +114,11 @@ func (c *Config) validate() error {
 	if len(c.ListMappings) == 0 {
 		return fmt.Errorf("list_mappings must contain at least one entry")
 	}
-	for list, entity := range c.ListMappings {
+	for list, mapping := range c.ListMappings {
 		if list == "" {
 			return fmt.Errorf("list_mappings contains an empty Reminders list name")
 		}
-		if entity == "" {
+		if mapping.HAEntity == "" {
 			return fmt.Errorf("list_mappings[%q] has an empty HA entity ID", list)
 		}
 	}

@@ -163,9 +163,14 @@ func runStatus() error {
 	fmt.Println("────────────────────")
 
 	// Daemon state.
-	if setup.IsDaemonLoaded() {
-		fmt.Println("  Daemon:    running (launchd)")
-	} else {
+	switch ds := setup.GetDaemonStatus(); {
+	case ds.Running:
+		fmt.Printf("  Daemon:    running (launchd, PID %d)\n", ds.PID)
+	case ds.Loaded:
+		// Loaded but no process: it keeps exiting at startup. Reading "running"
+		// here would hide exactly the failure the user needs to look into.
+		fmt.Printf("  Daemon:    loaded but NOT running (last exit status %d) — see errors.log\n", ds.LastExitStatus)
+	default:
 		fmt.Println("  Daemon:    not loaded")
 	}
 
@@ -371,6 +376,11 @@ func startSync(cfgPath string, verbose, daemon bool) error {
 
 	bootstrap := syncp.NewBootstrap(remAdapter, haAdapter, store, logger, os.Stdin, os.Stdout)
 	if _, err := bootstrap.Run(ctx, cfg.ListMappings); err != nil {
+		if errors.Is(err, syncp.ErrBootstrapDeclined) {
+			// Do not fall through to the sync engine: with an empty state DB it
+			// would treat every item on both sides as new and copy it across.
+			return fmt.Errorf("%w — nothing was synced; run `reminderrelay sync-once` in a terminal and answer y to enable syncing", err)
+		}
 		return fmt.Errorf("first-run bootstrap: %w", err)
 	}
 

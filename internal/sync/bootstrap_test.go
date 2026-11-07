@@ -3,6 +3,7 @@ package sync
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -101,8 +102,11 @@ func TestBootstrap_CancelledByUser(t *testing.T) {
 
 	b := NewBootstrap(rem, ha, store, slog.Default(), input, &output)
 	ran, err := b.Run(context.Background(), testMappings)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// Declining must surface as an error, not (false, nil): callers treat
+	// (false, nil) as "no bootstrap needed" and go on to sync — which, with an
+	// empty state DB, copies every item on both sides across.
+	if !errors.Is(err, ErrBootstrapDeclined) {
+		t.Fatalf("err = %v, want ErrBootstrapDeclined", err)
 	}
 	if ran {
 		t.Error("bootstrap should not execute when user says no")
@@ -111,6 +115,32 @@ func TestBootstrap_CancelledByUser(t *testing.T) {
 	// State DB should remain empty.
 	if store.count() != 0 {
 		t.Error("state DB should be empty after cancellation")
+	}
+}
+
+// TestBootstrap_NoInteractiveInput_IsDeclined covers running under launchd:
+// stdin is /dev/null, so the confirmation prompt gets EOF instead of an
+// answer. That must count as "not confirmed", never as consent.
+func TestBootstrap_NoInteractiveInput_IsDeclined(t *testing.T) {
+	now := time.Now().UTC()
+	rem := newMockReminders(
+		newItem("rem-1", "Task", "Shopping", model.PriorityNone, false, now),
+	)
+	ha := newMockHA()
+	ha.addItems("todo.shopping", model.Item{UID: "ha-1", Title: "Old HA item", ModifiedAt: now})
+	store := newMockStore()
+
+	var output bytes.Buffer
+	b := NewBootstrap(rem, ha, store, slog.Default(), strings.NewReader(""), &output)
+	ran, err := b.Run(context.Background(), testMappings)
+	if !errors.Is(err, ErrBootstrapDeclined) {
+		t.Fatalf("err = %v, want ErrBootstrapDeclined", err)
+	}
+	if ran {
+		t.Error("bootstrap must not execute without an explicit yes")
+	}
+	if store.count() != 0 || rem.count() != 1 || len(ha.getItems("todo.shopping")) != 1 {
+		t.Error("nothing may be written to either side or the state DB without confirmation")
 	}
 }
 

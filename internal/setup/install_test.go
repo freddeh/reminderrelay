@@ -173,3 +173,31 @@ func TestWizard_OfferStateDBReset_DefaultOnEmptyInput_KeepsDatabase(t *testing.T
 		t.Errorf("database should still exist after default (no) response: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// parseLaunchctlList
+// ---------------------------------------------------------------------------
+
+func TestParseLaunchctlList_Running(t *testing.T) {
+	out := "{\n\t\"Label\" = \"com.github.njoerd114.reminderrelay\";\n\t\"LastExitStatus\" = 0;\n\t\"PID\" = 4242;\n}\n"
+	st := parseLaunchctlList(out)
+	if !st.Loaded || !st.Running || st.PID != 4242 || st.LastExitStatus != 0 {
+		t.Errorf("got %+v, want loaded+running, PID 4242, exit 0", st)
+	}
+}
+
+// A loaded job whose process keeps exiting at startup has no PID entry — this
+// is the case `status` used to misreport as "running".
+func TestParseLaunchctlList_LoadedButNotRunning(t *testing.T) {
+	out := "{\n\t\"Label\" = \"com.github.njoerd114.reminderrelay\";\n\t\"LastExitStatus\" = 256;\n}\n"
+	st := parseLaunchctlList(out)
+	if !st.Loaded {
+		t.Error("job should be reported as loaded")
+	}
+	if st.Running || st.PID != 0 {
+		t.Errorf("got %+v, want not running (no PID entry)", st)
+	}
+	if st.LastExitStatus != 256 {
+		t.Errorf("LastExitStatus = %d, want 256", st.LastExitStatus)
+	}
+}

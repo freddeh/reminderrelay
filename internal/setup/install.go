@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -175,10 +177,50 @@ func RemoveBinary() error {
 	return cmd.Run()
 }
 
-// IsDaemonLoaded checks whether the launchd job is currently loaded.
+// IsDaemonLoaded checks whether the launchd job is currently loaded. Loaded
+// is not the same as running — see [GetDaemonStatus].
 func IsDaemonLoaded() bool {
-	cmd := exec.Command("launchctl", "list", PlistLabel)
-	return cmd.Run() == nil
+	return GetDaemonStatus().Loaded
+}
+
+// DaemonStatus describes the launchd job's state. A job can be Loaded
+// without Running: with KeepAlive set, launchd keeps a job registered even
+// while its process keeps exiting at startup (HA unreachable, Reminders
+// access denied, first-run bootstrap not confirmed, ...).
+type DaemonStatus struct {
+	Loaded         bool
+	Running        bool
+	PID            int
+	LastExitStatus int
+}
+
+// GetDaemonStatus queries launchd for the ReminderRelay job.
+func GetDaemonStatus() DaemonStatus {
+	out, err := exec.Command("launchctl", "list", PlistLabel).Output()
+	if err != nil {
+		return DaemonStatus{}
+	}
+	return parseLaunchctlList(string(out))
+}
+
+var (
+	launchctlPIDRe  = regexp.MustCompile(`"PID"\s*=\s*(\d+);`)
+	launchctlExitRe = regexp.MustCompile(`"LastExitStatus"\s*=\s*(-?\d+);`)
+)
+
+// parseLaunchctlList parses the output of `launchctl list <label>` for a job
+// that is known to be loaded. A PID entry is present only while the job's
+// process is actually running.
+func parseLaunchctlList(out string) DaemonStatus {
+	st := DaemonStatus{Loaded: true}
+	if m := launchctlPIDRe.FindStringSubmatch(out); m != nil {
+		st.PID, _ = strconv.Atoi(m[1])
+		st.Running = st.PID > 0
+	}
+	if m := launchctlExitRe.FindStringSubmatch(out); m != nil {
+		st.LastExitStatus, _ = strconv.Atoi(m[1])
+	}
+	return st
 }
 
 // ResetStateDB removes the sync state database at its default location,

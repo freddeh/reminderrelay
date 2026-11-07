@@ -3,6 +3,7 @@ package sync
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,14 @@ import (
 	"github.com/njoerd114/reminderrelay/internal/model"
 	"github.com/njoerd114/reminderrelay/internal/state"
 )
+
+// ErrBootstrapDeclined is returned by [Bootstrap.Run] when the first-run
+// bootstrap was needed but not confirmed — the user answered no, or there
+// was no interactive input to answer at all (e.g. under launchd). Callers
+// must NOT go on to reconcile in that case: with an empty state DB every
+// item on both sides looks untracked, so a sync would copy everything across
+// — exactly what declining the bootstrap is meant to prevent.
+var ErrBootstrapDeclined = errors.New("first-run bootstrap not confirmed")
 
 // Bootstrap performs the first-run linkage of existing items between Apple
 // Reminders and Home Assistant. It matches items by title, prints a summary,
@@ -58,7 +67,9 @@ type matchedPair struct {
 }
 
 // Run checks whether the state DB is empty and, if so, performs the first-run
-// bootstrap. Returns true if bootstrap was executed, false if skipped.
+// bootstrap. Returns true if bootstrap was executed, and false with a nil
+// error if it wasn't needed (state DB already populated). If it was needed
+// but not confirmed it returns false and [ErrBootstrapDeclined].
 func (b *Bootstrap) Run(ctx context.Context, listMappings map[string]model.ListMapping) (bool, error) {
 	empty, err := b.store.IsEmpty(ctx)
 	if err != nil {
@@ -106,7 +117,7 @@ func (b *Bootstrap) Run(ctx context.Context, listMappings map[string]model.ListM
 	// Ask for confirmation.
 	if !b.confirm() {
 		b.log.Info("bootstrap cancelled by user")
-		return false, nil
+		return false, ErrBootstrapDeclined
 	}
 
 	// Execute: write matched pairs to state DB, push unmatched Reminders → HA.

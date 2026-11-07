@@ -57,9 +57,9 @@ The wizard will walk you through:
 3. Discovering Reminders lists and HA todo entities
 4. Mapping lists to entities interactively
 5. Writing the config file
-6. Optionally installing as a background daemon
+6. Optionally installing as a background daemon — see [Background daemon](#background-daemon)
 
-On first sync you will be prompted to review and confirm bootstrap matches — nothing is written until you type **y**.
+On first sync you will be prompted to review and confirm bootstrap matches — nothing is written until you type **y**. Declining (or running without a terminal to answer in) aborts the sync entirely; nothing is copied to either side. So with an empty state DB, run `reminderrelay sync-once` once in a terminal and answer **y** *before* the background daemon can take over.
 
 <details>
 <summary>Manual config (alternative to wizard)</summary>
@@ -88,6 +88,22 @@ Then test with `just sync-once` and install with `just install`.
 
 </details>
 
+## Background daemon
+
+`reminderrelay setup` (or `reminderrelay install-daemon` / `just install`, which do the same without the questions) installs three things:
+
+| What | Where |
+|---|---|
+| CLI binary | `/usr/local/bin/reminderrelay` |
+| **App bundle** the daemon actually runs from | `~/Applications/ReminderRelay.app` (ad-hoc signed, no Dock icon) |
+| launchd agent | `~/Library/LaunchAgents/com.github.njoerd114.reminderrelay.plist` |
+
+**Why an app bundle and not just the binary?** Since macOS 15, access to LAN addresses (your Home Assistant at `192.168.x.x`) is gated by the *Local Network* privacy permission. A command-line tool started from Terminal borrows Terminal's permission — which is why `reminderrelay sync-once` works in a terminal — but a bare binary started by launchd has no identity macOS can attach a permission to: its connections fail with `no route to host`, and no dialog ever appears. Wrapping the binary in a minimal `.app` (with the required usage descriptions in its `Info.plist`) and launching it through LaunchServices (`open -a`) gives it that identity. Reminders access benefits the same way.
+
+**One-time prompts.** The first time the daemon starts, macOS asks for *Local Network* and *Reminders* access for **ReminderRelay**. Click **Allow** in the Mac's desktop session — on a VM, in its console window; a terminal or SSH session can't answer them. The first connection attempt may fail while a prompt is still open; launchd restarts the daemon automatically and it works once you've allowed it.
+
+**After an update the prompts can come back.** The bundle is signed ad hoc, so every rebuild has a new code identity and macOS may ask again. Re-run `reminderrelay setup` (or `install-daemon`) to update — it stops the old instance, rebuilds the bundle from the new binary, and reloads the job.
+
 ## CLI Reference
 
 ```bash
@@ -95,6 +111,7 @@ reminderrelay setup                     # interactive first-run wizard
 reminderrelay daemon [--config <path>]  # start polling + WebSocket listener
 reminderrelay sync-once [--config ...]  # single reconcile pass then exit
 reminderrelay status                    # show daemon & config state
+reminderrelay install-daemon            # (re)install the background daemon, non-interactively
 reminderrelay uninstall [--purge]       # stop daemon and remove files
 reminderrelay version                   # print version
 ```
@@ -273,11 +290,23 @@ tail -f ~/Library/Logs/reminderrelay/errors.log
 ## Uninstall
 
 ```bash
-reminderrelay uninstall          # stop daemon + remove binary and plist
+reminderrelay uninstall          # stop daemon + remove binary, app bundle and plist
 reminderrelay uninstall --purge  # also remove config, state DB, and logs
 ```
 
 ## Troubleshooting
+
+### Daemon says "loaded but NOT running"
+
+`reminderrelay status` distinguishes *loaded* (launchd knows the job) from *running* (there is a live process). With `KeepAlive`, launchd keeps a job loaded even while its process exits at every start, so look at `~/Library/Logs/reminderrelay/errors.log` for the reason. Common ones:
+
+- `first-run bootstrap not confirmed` — the state DB is empty and a daemon has no terminal to confirm in. Run `reminderrelay sync-once` once in a terminal and answer **y**.
+- `no route to host` — see below.
+- Home Assistant not reachable yet right after boot — launchd retries every 10 s, so this resolves itself.
+
+### `no route to host` from the daemon, but `sync-once` works in a terminal
+
+macOS blocked the daemon from the local network (see [Background daemon](#background-daemon)). Make sure you installed the daemon with the current build (`reminderrelay install-daemon`), so it runs as `~/Applications/ReminderRelay.app` rather than as a bare binary, then allow the *Local Network* prompt in the desktop session. If no prompt shows up, check *System Settings → Privacy & Security → Local Network* for a **ReminderRelay** entry and make sure it is switched on.
 
 ### Reminders access denied (TCC)
 
@@ -324,9 +353,9 @@ internal/model/           Shared Item type, priority encoding, content hash
 internal/reminders/       Apple Reminders adapter (EventKit via cgo)
 internal/homeassistant/   HA REST + WebSocket adapter, retry logic, calendar mirroring
 internal/sync/            Reconciler (field-level merge, calendar mirror), bootstrap wizard, daemon engine
-internal/setup/           Interactive setup wizard, daemon install/uninstall
+internal/setup/           Interactive setup wizard, daemon install/uninstall (app bundle + launchd plist)
 internal/telemetry/       Optional OpenTelemetry OTLP gRPC export
-deployment/               launchd plist, install/uninstall scripts
+deployment/               Thin install/uninstall wrapper scripts (the logic lives in the Go binary)
 ```
 
 ## License

@@ -270,30 +270,10 @@ func (wiz *Wizard) offerDaemonInstall(_ context.Context) error {
 
 	_, _ = fmt.Fprintf(wiz.w, "\n")
 
-	// Install binary.
-	_, _ = fmt.Fprintf(wiz.w, "  Installing binary to %s...\n", BinaryInstallPath())
-	if err := InstallBinary(); err != nil {
-		return fmt.Errorf("installing binary: %w", err)
+	if err := InstallDaemon(wiz.w, homeDir); err != nil {
+		return err
 	}
-	_, _ = fmt.Fprintf(wiz.w, "  ✓ Binary installed\n")
-
-	// Write plist.
-	if err := WritePlist(homeDir); err != nil {
-		return fmt.Errorf("writing plist: %w", err)
-	}
-	_, _ = fmt.Fprintf(wiz.w, "  ✓ LaunchAgent plist written\n")
-
-	// Create log directory.
-	if err := CreateLogDir(homeDir); err != nil {
-		return fmt.Errorf("creating log directory: %w", err)
-	}
-	_, _ = fmt.Fprintf(wiz.w, "  ✓ Log directory created\n")
-
-	// Load daemon.
-	if err := LoadDaemon(homeDir); err != nil {
-		return fmt.Errorf("loading daemon: %w", err)
-	}
-	_, _ = fmt.Fprintf(wiz.w, "  ✓ Daemon loaded — running now\n")
+	PermissionNote(wiz.w)
 
 	cfgPath, _ := config.DefaultPath()
 	_, _ = fmt.Fprintf(wiz.w, "\nSetup complete! ReminderRelay is syncing in the background.\n")

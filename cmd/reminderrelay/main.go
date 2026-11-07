@@ -56,6 +56,8 @@ func run() error {
 		return printUsage()
 	}
 
+	setup.Version = version
+
 	cmd := os.Args[1]
 
 	// Subcommand dispatch.
@@ -68,6 +70,8 @@ func run() error {
 		return runSync(os.Args[2:], false)
 	case "status":
 		return runStatus()
+	case "install-daemon":
+		return runInstallDaemon()
 	case "uninstall":
 		return runUninstall(os.Args[2:])
 	case "version":
@@ -95,6 +99,7 @@ func printUsage() error {
 	fmt.Fprintln(os.Stderr, "  reminderrelay daemon [--config ...]   Run as continuous daemon")
 	fmt.Fprintln(os.Stderr, "  reminderrelay sync-once [--config ..] Single sync pass then exit")
 	fmt.Fprintln(os.Stderr, "  reminderrelay status                  Show daemon & config state")
+	fmt.Fprintln(os.Stderr, "  reminderrelay install-daemon          (Re)install the background daemon, non-interactively")
 	fmt.Fprintln(os.Stderr, "  reminderrelay uninstall [--purge]     Stop daemon and remove files")
 	fmt.Fprintln(os.Stderr, "  reminderrelay version                 Print version")
 	fmt.Fprintln(os.Stderr, "")
@@ -151,6 +156,23 @@ func runLegacy() error {
 	}
 
 	return startSync(*cfgPath, *verbose, *daemon)
+}
+
+// runInstallDaemon (re)installs the background daemon without the setup
+// wizard's questions — the same steps the wizard runs after its final prompt.
+func runInstallDaemon() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
+	fmt.Println("Installing ReminderRelay daemon...")
+	if err := setup.InstallDaemon(os.Stdout, homeDir); err != nil {
+		return err
+	}
+	setup.PermissionNote(os.Stdout)
+	fmt.Println("")
+	fmt.Println("  Check with: reminderrelay status")
+	return nil
 }
 
 // runStatus prints the current daemon and configuration state.
@@ -235,6 +257,9 @@ func runUninstall(args []string) error {
 		}
 	}
 
+	// The job's child is `open`; unloading doesn't stop the app it launched.
+	setup.StopApp(homeDir)
+
 	// 2. Remove plist.
 	if err := setup.RemovePlist(homeDir); err != nil {
 		fmt.Printf("  ⚠ %v\n", err)
@@ -242,7 +267,12 @@ func runUninstall(args []string) error {
 		fmt.Println("  ✓ Plist removed")
 	}
 
-	// 3. Remove binary.
+	// 3. Remove app bundle and binary.
+	if err := setup.RemoveAppBundle(homeDir); err != nil {
+		fmt.Printf("  ⚠ %v\n", err)
+	} else {
+		fmt.Println("  ✓ App bundle removed")
+	}
 	fmt.Println("  Removing binary...")
 	if err := setup.RemoveBinary(); err != nil {
 		fmt.Printf("  ⚠ %v\n", err)
@@ -368,7 +398,14 @@ func startSync(cfgPath string, verbose, daemon bool) error {
 
 	logger.Info("pinging Home Assistant…", "url", cfg.HAURL)
 	if err := haAdapter.Ping(ctx); err != nil {
-		return fmt.Errorf("connecting to Home Assistant at %q: %w\n\nCheck ha_url and ha_token in your config file", cfg.HAURL, err)
+		hint := "Check ha_url and ha_token in your config file"
+		if homeassistant.IsNoRouteToHost(err) {
+			hint = "\"no route to host\" for a LAN address that works from a terminal usually means macOS blocked this\n" +
+				"process from the local network (System Settings → Privacy & Security → Local Network). Run the\n" +
+				"daemon via the installed app (`reminderrelay install-daemon`) and allow the prompt — a bare binary\n" +
+				"started by launchd can never be granted that permission"
+		}
+		return fmt.Errorf("connecting to Home Assistant at %q: %w\n\n%s", cfg.HAURL, err, hint)
 	}
 	logger.Info("Home Assistant reachable")
 

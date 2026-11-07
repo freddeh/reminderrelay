@@ -31,8 +31,8 @@ const (
 
 // plistData holds template values for the launchd plist.
 type plistData struct {
-	BinaryPath string
-	HomeDir    string
+	AppPath string
+	HomeDir string
 }
 
 // BinaryInstallPath returns the full path to the installed binary.
@@ -83,22 +83,29 @@ func InstallBinary() error {
 	return nil
 }
 
-// WritePlist renders the launchd plist from the embedded template and writes
-// it to ~/Library/LaunchAgents/.
-func WritePlist(homeDir string) error {
-	tmpl, err := template.New("plist").Parse(plistTemplateStr)
+// RenderPlist renders the launchd plist from the embedded template.
+func RenderPlist(homeDir string) ([]byte, error) {
+	tmpl, err := template.New("plist").Funcs(template.FuncMap{"xml": escapeXML}).Parse(plistTemplateStr)
 	if err != nil {
-		return fmt.Errorf("parsing plist template: %w", err)
-	}
-
-	data := plistData{
-		BinaryPath: BinaryInstallPath(),
-		HomeDir:    homeDir,
+		return nil, fmt.Errorf("parsing plist template: %w", err)
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return fmt.Errorf("executing plist template: %w", err)
+	if err := tmpl.Execute(&buf, plistData{
+		AppPath: AppBundlePath(homeDir),
+		HomeDir: homeDir,
+	}); err != nil {
+		return nil, fmt.Errorf("executing plist template: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// WritePlist renders the launchd plist and writes it to
+// ~/Library/LaunchAgents/.
+func WritePlist(homeDir string) error {
+	rendered, err := RenderPlist(homeDir)
+	if err != nil {
+		return err
 	}
 
 	dest := PlistPath(homeDir)
@@ -106,7 +113,7 @@ func WritePlist(homeDir string) error {
 		return fmt.Errorf("creating LaunchAgents directory: %w", err)
 	}
 
-	if err := os.WriteFile(dest, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(dest, rendered, 0o644); err != nil {
 		return fmt.Errorf("writing plist to %s: %w", dest, err)
 	}
 	return nil
@@ -138,11 +145,16 @@ func LoadDaemon(homeDir string) error {
 func UnloadDaemon(homeDir string) error {
 	plist := PlistPath(homeDir)
 	if _, err := os.Stat(plist); os.IsNotExist(err) {
-		return nil // nothing to unload
+		StopApp(homeDir)
+		return nil // no job to unload
 	}
 	//nolint:gosec // user-controlled path
 	cmd := exec.Command("launchctl", "unload", plist)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	// Unloading kills `open`, not the app it launched — stop that explicitly
+	// or it would outlive the job (and keep running old code after an update).
+	StopApp(homeDir)
+	if err != nil {
 		return fmt.Errorf("launchctl unload: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil

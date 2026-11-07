@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>{{.BundleID}}</string>
+    <key>CFBundleName</key>
+    <string>{{.Name}}</string>
+    <key>CFBundleDisplayName</key>
+    <string>{{.Name}}</string>
+    <key>CFBundleExecutable</key>
+    <string>{{.Executable}}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleVersion</key>
+    <string>{{.Version}}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{{.Version}}</string>
+
+    <!-- Background agent: no Dock icon, no menu bar, only one instance. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+
+    <!-- Privacy usage descriptions. Without these macOS either refuses the
+         request outright or never shows the permission dialog. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ReminderRelay connects to your Home Assistant instance on the local network to sync to-do items.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>ReminderRelay syncs your Apple Reminders lists with Home Assistant to-do lists.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>ReminderRelay syncs your Apple Reminders lists with Home Assistant to-do lists.</string>
+</dict>
+</plist>

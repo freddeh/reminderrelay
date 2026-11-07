@@ -13,7 +13,7 @@ internal/state/         — SQLite repository (sync_items table)
 internal/reminders/     — Apple Reminders adapter (go-eventkit)
 internal/homeassistant/ — Home Assistant adapter (go-ha-client/v2)
 internal/sync/          — reconciliation engine + first-run bootstrap
-deployment/             — launchd plist, install/uninstall scripts
+deployment/             — thin install/uninstall wrapper scripts (logic lives in internal/setup)
 ```
 
 ## Architectural Invariants (always enforce)

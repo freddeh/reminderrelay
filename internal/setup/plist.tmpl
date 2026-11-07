@@ -6,10 +6,23 @@
     <key>Label</key>
     <string>com.github.njoerd114.reminderrelay</string>
 
-    <!-- Binary & arguments -->
+    <!-- Launch the app bundle through LaunchServices (`open -a`), not the bare
+         binary: macOS only grants "Local Network" and "Reminders" access to
+         something it can identify as an app, and a binary exec'd directly by
+         launchd gets "no route to host" for LAN addresses. -W keeps `open`
+         running for as long as the app runs, so KeepAlive below still works.
+         The stdout/stderr flags below route the app's own output to the log files. -->
     <key>ProgramArguments</key>
     <array>
-        <string>{{.BinaryPath}}</string>
+        <string>/usr/bin/open</string>
+        <string>-W</string>
+        <string>-a</string>
+        <string>{{xml .AppPath}}</string>
+        <string>--stdout</string>
+        <string>{{xml .HomeDir}}/Library/Logs/reminderrelay/output.log</string>
+        <string>--stderr</string>
+        <string>{{xml .HomeDir}}/Library/Logs/reminderrelay/errors.log</string>
+        <string>--args</string>
         <string>daemon</string>
     </array>
 
@@ -19,11 +32,12 @@
     <key>KeepAlive</key>
     <true/>
 
-    <!-- Logging: stdout/stderr go to ~/Library/Logs/reminderrelay/ -->
+    <!-- Logging: this only captures `open` itself (e.g. "unable to find
+         application"); the app's own output is routed by the flags above. -->
     <key>StandardOutPath</key>
-    <string>{{.HomeDir}}/Library/Logs/reminderrelay/output.log</string>
+    <string>{{xml .HomeDir}}/Library/Logs/reminderrelay/output.log</string>
     <key>StandardErrorPath</key>
-    <string>{{.HomeDir}}/Library/Logs/reminderrelay/errors.log</string>
+    <string>{{xml .HomeDir}}/Library/Logs/reminderrelay/errors.log</string>
 
     <!-- Throttle restarts if the daemon crashes immediately -->
     <key>ThrottleInterval</key>

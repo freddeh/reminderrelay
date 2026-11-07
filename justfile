@@ -4,10 +4,6 @@
 set shell := ["zsh", "-cu"]
 
 binary      := "reminderrelay"
-install_bin := "/usr/local/bin/" + binary
-plist_name  := "com.github.njoerd114.reminderrelay"
-plist_src   := "deployment/" + plist_name + ".plist"
-plist_dest  := env('HOME') / "Library/LaunchAgents/" + plist_name + ".plist"
 state_db    := env('HOME') / ".local/share/reminderrelay/state.db"
 
 # List available recipes
@@ -58,25 +54,17 @@ fmt:
 
 # ── Install / Uninstall ────────────────────────────────────────────────────────
 
-# Build and install binary + launchd plist
-install: build
-    @echo "Installing binary to {{install_bin}}..."
-    sudo cp {{binary}} {{install_bin}}
-    @echo "Installing launchd plist to {{plist_dest}}..."
-    mkdir -p $(dirname {{plist_dest}})
-    cp {{plist_src}} {{plist_dest}}
-    launchctl load {{plist_dest}}
-    @echo "Done. ReminderRelay will start on next login (RunAtLoad=true means it starts now too)."
+# The daemon runs from a signed ReminderRelay.app bundle, not the bare binary:
+# macOS only grants Local Network / Reminders access to something it can
+# identify as an app. `install-daemon` sets up CLI binary + bundle + plist.
 
-# Unload plist and remove binary
-uninstall:
-    @echo "Unloading launchd plist..."
-    -launchctl unload {{plist_dest}}
-    @echo "Removing plist..."
-    -rm {{plist_dest}}
-    @echo "Removing binary..."
-    -rm {{install_bin}}
-    @echo "Done."
+# Build, then (re)install the daemon: CLI binary, signed app bundle, launchd plist
+install: build
+    ./{{binary}} install-daemon
+
+# Stop the daemon and remove plist, app bundle and binary (config + state DB stay)
+uninstall: build
+    ./{{binary}} uninstall
 
 # ── Database ───────────────────────────────────────────────────────────────────
 
